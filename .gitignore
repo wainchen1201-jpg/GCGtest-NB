@@ -1,0 +1,24 @@
+# _drive/ 是掛到 Google Drive 的 junction。git 會直接穿透 junction、把雲端內容
+# 當成一般檔案收錄，所以排除它是正確性要求而不是慣例（ADR-0001）。
+/_drive/
+
+# 掛載點偵測失敗時的本機覆寫。每台裝置各自持有，不進版控。
+/.hybrid/local.json
+
+# 編輯器與工具的殘留物。心跳很忠實，沒排除的東西它都會送上雲端——這幾條不放這裡，
+# 每個專案的歷史都會長出一堆自動產生的垃圾。
+# 專案類型專屬的忽略規則（例如 KiCad 的 *.kicad_prl）請寫在專案自己的 .gitignore，
+# 不要加進模板——模板不假設任何特定的專案內容。
+.history/
+__pycache__/
+
+# 原子寫入（先寫 .writing 再 Move-Item）中途被砍掉留下的半成品。本機端的
+# .hybrid/project.json.writing 沒排除的話，心跳的 git add -A 會把它送上雲端
+# （ADR-0007 不變量 5(b)）。
+*.writing
+
+# 打包檔留下的東西。它們屬於「怎麼把專案弄到這台機器上」，不屬於專案內容。
+/_bootstrap/
+/開工.cmd
+/開工說明.md
+/開工包/

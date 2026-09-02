@@ -1,0 +1,7 @@
+* text=auto
+
+# Git LFS 預留但未啟用。需要時：先 git lfs install，再把下面用得到的行取消註解。
+#*.vsdx filter=lfs diff=lfs merge=lfs -text
+#*.step filter=lfs diff=lfs merge=lfs -text
+#*.stp  filter=lfs diff=lfs merge=lfs -text
+#*.zip  filter=lfs diff=lfs merge=lfs -text

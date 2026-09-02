@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "sensitiveFilePatterns": [
+    ".env",
+    ".env.*",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "*.pem",
+    "*.pfx",
+    "*.p12",
+    "*.key",
+    "*.ppk",
+    "credentials.json",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "_netrc",
+    "*.kdbx",
+    "*.tfstate",
+    "*.tfstate.backup"
+  ],
+  "contentSignatures": [
+    {
+      "name": "pem-private-key-header",
+      "pattern": "-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+      "description": "PEM 格式私鑰標頭"
+    },
+    {
+      "name": "aws-access-key-id",
+      "pattern": "\\bAKIA[0-9A-Z]{16}\\b",
+      "description": "AWS Access Key ID（AKIA 開頭 20 碼）"
+    },
+    {
+      "name": "github-token",
+      "pattern": "\\b(ghp_|github_pat_)[A-Za-z0-9_]{20,}\\b",
+      "description": "GitHub personal access token"
+    }
+  ],
+  "sizeThresholds": {
+    "softLimitBytes": 52428800,
+    "hardLimitBytes": 104857600
+  },
+  "aggregateThresholds": {
+    "totalAddedBytes": 209715200,
+    "totalAddedFileCount": 500
+  },
+  "entropyCheck": {
+    "enabled": true,
+    "minLength": 20,
+    "minEntropyBitsPerChar": 4.3
+  },
+  "allowlist": []
+}
