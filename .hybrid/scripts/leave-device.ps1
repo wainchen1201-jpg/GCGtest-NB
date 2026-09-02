@@ -142,7 +142,15 @@ try {
         Remove-Junction -Path $linkPath
         Write-Host "junction 已拆除"
         Write-Host "  原本指向：$target"
-        Write-Host "  目標還在：$(Test-Path -LiteralPath $target)"
+        # 這一行要回答「我拆掉連結之後，Drive 上那份東西還在嗎」。內插布林值會印出
+        # PowerShell 的型別字面值 True／False，混在中文句子裡看起來像程式壞掉——
+        # 而這正是使用者最需要確定的一句話（不變量 3：素材不能被工具動到）。
+        if (Test-Path -LiteralPath $target) {
+            Write-Host "  Drive 上的目標：還在（沒有被動到）"
+        } else {
+            Write-Host "  Drive 上的目標：不見了——這不是撤離造成的，撤離只拆連結。"
+            Write-Host "                  可能是還沒同步下來，也可能真的被刪了。"
+        }
     }
 
     # 從清單移除就好，不必碰排程器——排程項目是機器層級的，其他專案還要用它。

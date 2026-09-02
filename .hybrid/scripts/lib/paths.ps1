@@ -325,6 +325,14 @@ function Resolve-DriveRoot {
 
     $detected = Find-GoogleDriveRoot
     if ($detected) {
+        # 偵測成功**不寫** local.json，這是刻意的，不是漏寫。
+        # 把猜出來的值寫成設定，等於把一次成功的猜測升格成永久事實：下次 Drive
+        # 掛在別的地方時，那個檔案會讓工具停止重新偵測，而錯誤會看起來像設定正確。
+        # 只有使用者用 -DriveRoot 明確指定時才落地——那是人的決定，不是猜測。
+        #
+        # 外顯症狀是「自動偵測成功，但 .hybrid\local.json 不存在」。看起來像 bug，
+        # 三裝置試點時 PC2 就是這樣提報的（它沒有替我們判斷，只擺出事實）。
+        # 這段註解存在的目的就是擋下「好心補上」那一手。
         return [pscustomobject]@{ Path = (Get-NormalisedPath $detected); Source = 'detected' }
     }
     return $null

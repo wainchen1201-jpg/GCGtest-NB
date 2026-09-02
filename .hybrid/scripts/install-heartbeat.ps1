@@ -71,10 +71,19 @@ try {
         (Join-Path $PSScriptRoot 'run-heartbeats.ps1'),
         (Join-Path $PSScriptRoot 'run-heartbeats.vbs')
     )
-    $libSource = @(
-        (Join-Path $PSScriptRoot 'lib\paths.ps1'),
-        (Join-Path $PSScriptRoot 'lib\registry.ps1')
-    )
+    # 整個 lib\ 複製過去，不列舉檔名。
+    #
+    # 列舉過的那一版寫了 paths + registry 兩個，但派工器 dot-source 三個
+    # （多一個 runtime.ps1），而 runtime.ps1 自己又 dot-source version.ps1——
+    # 少了兩個。dot-source 在腳本頂層、任何 try/catch 之前，配上
+    # $ErrorActionPreference = 'Stop'，派工器在寫任何 log 之前就死，
+    # 排程器拿到 0x80070002，而 state.json 與 last-run.log 凍結在最後一次成功，
+    # 於是健康檢查永遠顯示「正常」。三裝置試點時兩台機器同時處於這個狀態好幾小時。
+    #
+    # Install-RuntimeFiles 早就寫了同樣的理由（「列舉容易漏」），runner 這一半沒照做。
+    # 多帶幾支目前用不到的 lib 沒有安全代價——ADR-0008 守的是 $ProjectRoot 底下的
+    # 內容不能被執行，不是機器層級的 lib\ 要多精簡。
+    $libSourceDir = Join-Path $PSScriptRoot 'lib'
     $shim = Join-Path $homeDir 'run-heartbeats.vbs'
     $argumentList = ('"{0}"' -f $shim)
 
@@ -105,7 +114,7 @@ try {
     # --- 把派工器放到機器層級 ---------------------------------------------
     New-Item -ItemType Directory -Path (Join-Path $homeDir 'lib') -Force | Out-Null
     foreach ($f in $runnerSource) { Copy-Item -LiteralPath $f -Destination $homeDir -Force }
-    foreach ($f in $libSource)    { Copy-Item -LiteralPath $f -Destination (Join-Path $homeDir 'lib') -Force }
+    Copy-Item -Path (Join-Path $libSourceDir '*') -Destination (Join-Path $homeDir 'lib') -Recurse -Force
 
     # --- 中央 runtime：第一版 -----------------------------------------------
     # ADR-0008：安裝派工器與安裝第一版 runtime 是同一個動作，不能分開——否則

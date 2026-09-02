@@ -68,6 +68,80 @@ function Get-LatestPreflightSkipTrace {
     }
 }
 
+function Format-Age {
+    # 把一段時間講成人話。健康訊息要回答「多久沒動了」，因為使用者要據此判斷
+    # 這是關機一夜還是排程死了——同樣一句「異常」對這兩件事沒有幫助。
+    param([Parameter(Mandatory)][TimeSpan]$Span)
+    $minutes = [int]$Span.TotalMinutes
+    if ($minutes -lt 60) { return "$minutes 分鐘" }
+    $hours = [int]$Span.TotalHours
+    if ($hours -lt 48) { return "$hours 小時" }
+    return "$([int]$Span.TotalDays) 天"
+}
+
+function Get-DispatcherLiveness {
+    # 機器層級：派工器**有沒有起得來**。這一層是專案層級的健康檢查看不到的——
+    # state.json 與 last-run.log 都是派工器自己寫的，它起不來（例如 dot-source
+    # 失敗，那發生在頂層、任何 try/catch 之前），兩個檔就凍結在最後一次成功，
+    # 於是每個專案都顯示「上次成功」。真機試點時兩台機器就是這樣連續失敗數小時
+    # 而健康一路顯示「正常」（票 35）。
+    #
+    # **不能只看 log 有多舊。** 這個 repo 已經為了同樣的理由拒絕過那個做法
+    # （見 HealthRecentAttemptHours 那段）：機器關機一晚，log 一樣會很舊，
+    # 但含義完全不同，而分不清楚時對使用者宣稱一個可能是錯的診斷比不說更糟。
+    #
+    # 能區分的訊號是**排程器自己的紀錄**：它由排程器寫，不是派工器寫。
+    #
+    #   排程器說它跑過了，而 log 比那次還舊  → 派工器被啟動但死在寫 log 之前。決定性。
+    #   排程器也很久沒跑                      → 機器八成關著。不猜，不報。
+    #
+    # 呼叫端負責去問作業系統（Get-ScheduledTaskInfo），把結果傳進來——查詢留在邊界，
+    # 判斷留在這裡，這樣判斷才測得到。
+    param(
+        [string]$ListPath,
+        [AllowNull()][Nullable[DateTime]]$TaskLastRun = $null,
+        [AllowNull()][Nullable[int]]$TaskLastResult = $null
+    )
+    $logPath = Join-Path (Get-HeartbeatHome -ListPath $ListPath) 'last-run.log'
+    $hasLog = Test-Path -LiteralPath $logPath
+    $logTime = if ($hasLog) { (Get-Item -LiteralPath $logPath).LastWriteTime } else { $null }
+
+    if (-not $TaskLastRun) {
+        # 問不到排程器（沒安裝、模組不可用、或呼叫端沒傳）。這時只能說事實，不下診斷。
+        if (-not $hasLog) {
+            return [pscustomobject]@{ Severity = 'unknown'; Line = '還沒跑過（剛安裝的話等一輪，約 15 分鐘）' }
+        }
+        return [pscustomobject]@{
+            Severity = 'unknown'
+            Line = "最後一次跑完是 $($logTime.ToString('yyyy-MM-dd HH:mm:ss'))（$(Format-Age -Span ((Get-Date) - $logTime)) 前）；查不到排程器紀錄，無法判斷它現在有沒有在跑"
+        }
+    }
+
+    $ranAt = $TaskLastRun.ToString('yyyy-MM-dd HH:mm:ss')
+
+    # 排程器跑過，但派工器沒留下那一輪的紀錄——它被啟動了卻死在寫 log 之前。
+    # 容忍 5 分鐘，避免「正在跑、還沒寫完」被誤判。
+    if ((-not $hasLog) -or ($TaskLastRun - $logTime).TotalMinutes -gt 5) {
+        $logPart = if ($hasLog) { "但紀錄停在 $($logTime.ToString('yyyy-MM-dd HH:mm:ss'))" } else { '但完全沒有紀錄' }
+        return [pscustomobject]@{
+            Severity = 'critical'
+            Line = "排程器在 $ranAt 啟動過它，$logPart——派工器被啟動了卻死在寫紀錄之前"
+        }
+    }
+
+    if ($null -ne $TaskLastResult -and $TaskLastResult -ne 0) {
+        return [pscustomobject]@{
+            Severity = 'critical'
+            Line = "最近一次 $ranAt 失敗（排程器回報 $TaskLastResult）"
+        }
+    }
+
+    return [pscustomobject]@{
+        Severity = 'ok'
+        Line = "正常（最近一次 $ranAt，$(Format-Age -Span ((Get-Date) - $logTime)) 前）"
+    }
+}
+
 function Get-ProjectHealth {
     # 把「這個專案在這台機器上的心跳有沒有問題」收成一個判定結果。純讀取。
     #

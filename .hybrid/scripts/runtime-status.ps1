@@ -93,6 +93,43 @@ try {
     Write-Host ""
 
     $entries = @(Read-ProjectList -ListPath $ListPath)
+    # 派工器自己的死活要單獨講，而且要在專案清單**之前**——因為派工器沒跑的話，
+    # 底下每個專案顯示的都是凍結在最後一次成功的舊資料，先看到那些會誤導。
+    #
+    # 去問排程器（它的紀錄由排程器寫，不是派工器寫，所以派工器死了它照樣更新）。
+    # 問不到就傳 $null，判斷函式會退化成「查不到，無法判斷」——不猜。
+    # 測試接縫：HYBRID_TEST_TASK_LASTRUN / HYBRID_TEST_TASK_RESULT 覆寫這次查詢，
+    # 讓「排程器說跑過但紀錄沒更新」這個情境測得到（真的去動排程器才測得到就等於測不到）。
+    $taskLastRun = $null
+    $taskLastResult = $null
+    # 'none' 表示「假裝查不到」——測試需要在一台**真的裝了排程**的機器上重現
+    # 「查不到排程器」那條路徑，否則那條路徑只有在沒裝的機器上才測得到。
+    if ($env:HYBRID_TEST_TASK_LASTRUN -eq 'none') {
+        $taskLastRun = $null
+    } elseif ($env:HYBRID_TEST_TASK_LASTRUN) {
+        $taskLastRun = [DateTime]::Parse($env:HYBRID_TEST_TASK_LASTRUN)
+        if ($env:HYBRID_TEST_TASK_RESULT) { $taskLastResult = [int]$env:HYBRID_TEST_TASK_RESULT }
+    } else {
+        try {
+            $info = Get-ScheduledTaskInfo -TaskPath '\hybrid-workspace\' -TaskName 'heartbeat' -ErrorAction Stop
+            if ($info.LastRunTime -and $info.LastRunTime -gt [DateTime]'1900-01-01') { $taskLastRun = $info.LastRunTime }
+            $taskLastResult = [int]$info.LastTaskResult
+        } catch {
+            # 排程沒安裝、或這個環境沒有 ScheduledTasks 模組。兩種都只是「問不到」。
+        }
+    }
+
+    $dispatcher = Get-DispatcherLiveness -ListPath $ListPath -TaskLastRun $taskLastRun -TaskLastResult $taskLastResult
+    Write-Host "派工器"
+    Write-Host "  最近一次 ：$($dispatcher.Line)"
+    if ($dispatcher.Severity -eq 'critical') {
+        Write-Host "  注意     ：底下每個專案的健康是派工器寫的，它沒跑就不會更新——"
+        Write-Host "             那些「正常」只代表最後一次跑的時候是好的。"
+        Write-Host "  怎麼查   ：事件記錄 Microsoft-Windows-TaskScheduler/Operational 的 Id 201"
+        Write-Host "             有原始的結束碼（LastTaskResult 會被正規化成 1，看不出原因）。"
+    }
+    Write-Host ""
+
     $state = Read-HeartbeatState -ListPath $ListPath
     Write-Host "登記的專案（共 $($entries.Count) 個）"
 

@@ -229,8 +229,27 @@ try {
         if ($axis1 -eq 'none' -or $axis1 -eq 'released') {
             $leaseState = 'none'
         } elseif ($axis1 -eq 'self') {
-            Set-LeaseReleased -ProjectRoot $ProjectRoot -Lease $lease -SessionId $sessionId -Identity $deviceIdentity | Out-Null
-            $leaseState = 'released'
+            # 票 34：**沒確認同步就不放**。
+            #
+            # 租約保護的不是 git（git 會 merge），是 _drive/ 底下那個唯一的、不可 merge
+            # 的實體。而 -DriveSynced 存在的唯一理由，就是「同步完成」只有人看得到。
+            # 在人確認之前釋放租約，等於在唯一能判斷安全的訊號到達之前開放那個資源。
+            #
+            # 舊順序（先放、後檢查）留下的中間狀態不留痕跡：git 已推、工作區乾淨、
+            # 租約 released——跟一個完整跑完兩段的收工在檔案上完全相同，沒有任何欄位
+            # 記錄「同步尚未確認」。使用者看到 exit 2 以為失敗而放棄，下一台看到的是
+            # 一個乾淨、可以接手的專案，而 Drive 可能正在傳一半（ADR-0006 開頭第 2 點：
+            # 那個狀態不會產生任何錯誤訊息）。
+            #
+            # 代價是忘記跑第二段的人會讓租約留著、別台被擋。那個「被擋」有三層機制
+            # 接住（代理收工、expiresAt 到期、判活降級時的阻擋訊息）而且會發出聲音；
+            # 提前釋放造成的靜默中間狀態一層都沒有。兩種失敗的代價不對稱。
+            if ($DriveSynced) {
+                Set-LeaseReleased -ProjectRoot $ProjectRoot -Lease $lease -SessionId $sessionId -Identity $deviceIdentity | Out-Null
+                $leaseState = 'released'
+            } else {
+                $leaseState = 'held-pending-sync'
+            }
         } else {
             $leaseState = $axis1
             $leaseHolderLabel = switch ($axis1) {
@@ -282,10 +301,13 @@ try {
     }
     # D2：租約那一行要說出持有者是誰，不能只說「已釋放」。
     $leaseLabel = switch ($leaseState) {
-        'released' { '已釋放' }
-        'none'     { '本來就沒有人持有' }
-        'skipped'  { '沒有掛載，無法釋放' }
-        default    { "沒有釋放——持有的是：$leaseHolderLabel" }
+        'released'          { '已釋放' }
+        # 這一行要講清楚「還握著」以及「在等什麼」。說「已釋放」會讓人以為可以換裝置了；
+        # 只說「沒有釋放」又會讓人以為出錯了——它既沒出錯，也還沒完成。
+        'held-pending-sync' { '仍持有（等你確認 Drive 同步完成後才釋放）' }
+        'none'              { '本來就沒有人持有' }
+        'skipped'           { '沒有掛載，無法釋放' }
+        default             { "沒有釋放——持有的是：$leaseHolderLabel" }
     }
 
     Write-Host "收工"
