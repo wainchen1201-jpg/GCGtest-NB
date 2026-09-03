@@ -142,6 +142,70 @@ function Get-DispatcherLiveness {
     }
 }
 
+function Get-ProjectListAgreement {
+    # 派工器上一輪看到的清單，跟我現在看到的，是不是同一份？
+    #
+    # 派工器每一輪都把它自己看到的大小與專案數寫進 last-run.log；這支腳本從**它自己的
+    # 行程**也看得到同樣兩個數字。兩者本來就該相等——**不等就是異常**。
+    #
+    # 這個判斷刻意不去問「為什麼不等」。三裝置試點時的成因是 MSIX 重導向
+    # （封裝環境裡的行程看到套件私有的副本，排程工作看到真實檔案，票 38），
+    # 但同樣的不一致也可能來自權限、環境變數空掉（run-heartbeats.ps1 的註解說
+    # 「實測被這個騙過兩次」，那兩次是這個變體）、或路徑解析錯。
+    #
+    # 不需要知道成因，也不需要判斷自己在哪——**只比對兩個都已經存在的觀察值**。
+    # 這也是它不會誤報的原因：兩個行程讀同一個路徑卻拿到不同大小，本身就是事實。
+    #
+    # 讀不到 log、或 log 是舊版格式（沒有那兩個數字）→ 回 $null，什麼都不說。
+    # 把「格式不認得」當成「不一致」會在每台還沒升級的機器上誤報。
+    param([string]$ListPath)
+
+    $logPath = Join-Path (Get-HeartbeatHome -ListPath $ListPath) 'last-run.log'
+    if (-not (Test-Path -LiteralPath $logPath)) { return $null }
+
+    try {
+        $log = Get-Content -LiteralPath $logPath -Raw -Encoding UTF8
+    } catch {
+        return $null
+    }
+
+    $sizeMatch = [regex]::Match($log, '存在，(\d+) 位元組')
+    $countMatch = [regex]::Match($log, '清單裡有 (\d+) 個專案')
+    if (-not $sizeMatch.Success) { return $null }
+
+    $seenBytes = [int]$sizeMatch.Groups[1].Value
+    $seenCount = if ($countMatch.Success) { [int]$countMatch.Groups[1].Value } else { -1 }
+
+    $listPath = Get-ProjectListPath -ListPath $ListPath
+    if (-not (Test-Path -LiteralPath $listPath)) {
+        return [pscustomobject]@{
+            Agrees = $false
+            Lines = @(
+                "清單不一致：派工器上一輪看到 $seenBytes 位元組的清單，但我現在看不到那個檔案。",
+                '  你讀到的清單，跟心跳讀到的不是同一份。'
+            )
+        }
+    }
+    $nowBytes = (Get-Item -LiteralPath $listPath -Force).Length
+    $nowCount = @(Read-ProjectList -ListPath $ListPath).Count
+
+    if ($seenBytes -eq $nowBytes) { return [pscustomobject]@{ Agrees = $true; Lines = @() } }
+
+    $countPart = if ($seenCount -ge 0) { "，$seenCount 個專案" } else { '' }
+    return [pscustomobject]@{
+        Agrees = $false
+        Lines = @(
+            "清單不一致：**你讀到的清單，跟心跳讀到的不是同一份。**",
+            "  派工器上一輪看到：$seenBytes 位元組$countPart",
+            "  這個行程看到的  ：$nowBytes 位元組，$nowCount 個專案",
+            "  路徑            ：$listPath",
+            '  同一個路徑在兩個行程眼中是不同的檔案。常見成因：這個行程跑在封裝或沙箱',
+            '  環境裡（讀寫被重導向到私有副本）、權限不同、或環境變數解析到別的位置。',
+            '  後果：從這裡做的登記，排程的心跳看不到。'
+        )
+    }
+}
+
 function Get-ProjectHealth {
     # 把「這個專案在這台機器上的心跳有沒有問題」收成一個判定結果。純讀取。
     #
@@ -241,6 +305,30 @@ function Get-ProjectHealthSummaryLines {
     $report = Get-ProjectHealth -Path $ProjectRoot -State $projectState
 
     if (-not $report.LastAttempt) {
+        # 這句話原本無條件列兩個可能原因：「還沒被排程觸發過」或「還沒安裝」。
+        # 三裝置試點時 PC2 那台**兩個都是假的**——排程當天觸發過兩次且結果 0，
+        # install-heartbeat 也在稍早提權裝好了。真正的原因是第三種：專案登記在一份
+        # 派工器看不到的清單裡（票 38 的 MSIX 重導向）。
+        #
+        # 「列了可能原因、但正確答案不在裡面」比含糊更糟：讀的人會從那兩個選項裡挑
+        # 一個去查，兩條都走到死路，然後大概率得出「大概是還沒跑到」然後就算了。
+        #
+        # 分辨方式不需要知道 MSIX，只要比對兩個現成的觀察值：**派工器最近跑完過一輪**
+        # （last-run.log 有新的時間戳）**卻沒有這個專案的紀錄**。這兩件事並存本身就
+        # 說明派工器沒有在處理這個專案，不管成因是沒登記、登記到別份清單、或別的。
+        $dispatcherRanRecently = $false
+        $logPath = Join-Path (Get-HeartbeatHome -ListPath $ListPath) 'last-run.log'
+        if (Test-Path -LiteralPath $logPath) {
+            $age = (Get-Date) - (Get-Item -LiteralPath $logPath).LastWriteTime
+            $dispatcherRanRecently = $age.TotalMinutes -le $script:HealthRecentAttemptHours * 60
+        }
+        if ($dispatcherRanRecently) {
+            return @(
+                '派工器最近跑完過一輪，但那一輪沒有這個專案——它沒有在處理這個專案。',
+                '  最可能是這個專案不在派工器讀得到的那份清單裡（開工的登記可能沒有落到同一份）。',
+                '  用 runtime-status.ps1 看「登記的專案」那一段，確認它在不在裡面。'
+            )
+        }
         return @('尚無心跳紀錄（可能還沒被排程觸發過，或這台機器還沒安裝 install-heartbeat.ps1）')
     }
     if ($report.Severity -eq 'ok') {

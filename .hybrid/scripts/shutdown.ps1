@@ -25,7 +25,7 @@
     ——它從來不是 preflight 政策的一部分，不可 override。
 
 .PARAMETER OverrideReason
-    -Override 的理由，必填、不可空白。
+    -Override 的理由，必填、不可空白（只有空白字元也不行——包括全形空白）。
 
 .OUTPUTS
     exit 0 = 可以換裝置；1 = 失敗；2 = 尚不可換裝置（卡在需要你處理的事情上）。
@@ -150,7 +150,15 @@ try {
             Write-Host "帶 -Override 與 -OverrideReason『理由』重跑（一次性，會留下稽核紀錄）。"
             exit $script:ExitNeedsYou
         }
-        if ($preflightScan.Blocked -and $Override -and -not $OverrideReason) {
+        # 用 IsNullOrWhiteSpace，不是 `-not $OverrideReason`。PowerShell 裡 "   " 是
+        # truthy，所以舊寫法讓三個空格穿過去——真機演練時實際發生過，而那三個空格
+        # 被永久寫進了稽核紀錄。
+        #
+        # 這不是龜毛的參數驗證：這個參數存在的唯一理由，是強迫放行的人說出他為什麼
+        # 認為這樣可以，而那句話是留給未來讀稽核紀錄的人看的。空白滿足語法、產生一筆
+        # 合法紀錄、通過所有檢查，**而且它是最省力的路徑**——趕時間的人不會編理由，
+        # 他會找最短的能過的字串。要求在最容易走的那條路上等於不存在。
+        if ($preflightScan.Blocked -and $Override -and [string]::IsNullOrWhiteSpace($OverrideReason)) {
             Write-Host "停下來了：-Override 要搭配 -OverrideReason 說明理由，不能空白。"
             exit $script:ExitNeedsYou
         }

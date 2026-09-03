@@ -89,6 +89,23 @@ try {
         } else {
             Write-Host "  schema   ：VERSION.json 讀不到，無法判定這個版本認得哪個區間"
         }
+
+        # 已經裝在這台、但沒有被指標指到的版本。真機試點時兩台機器都停在這個狀態：
+        # install-heartbeat 裝好了新版，但因為已經有 current 就不動指標（那是刻意的，
+        # 避免安裝器比艦隊舊時造成靜默降級），於是心跳活著卻跑舊碼——而那沒有訊號（票 37）。
+        #
+        # 只在真的有落差時才印。每次都印一段提醒會訓練人忽略它。
+        $runtimeRoot = Get-RuntimeRoot -ListPath $ListPath
+        $idleVersions = @()
+        if (Test-Path -LiteralPath $runtimeRoot) {
+            $idleVersions = @(Get-ChildItem -LiteralPath $runtimeRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notlike '*.staging' -and $_.Name -ne $runtimeVersion -and $_.Name -ne $previousVersion } |
+                Select-Object -ExpandProperty Name)
+        }
+        if ($idleVersions.Count -gt 0) {
+            Write-Host "  也裝好了 ：$($idleVersions -join '、')——但沒有在跑"
+            Write-Host "             要切換：upgrade-runtime.ps1（不需要提權，先加 -DryRun 看它會做什麼）"
+        }
     }
     Write-Host ""
 
@@ -129,6 +146,14 @@ try {
         Write-Host "             有原始的結束碼（LastTaskResult 會被正規化成 1，看不出原因）。"
     }
     Write-Host ""
+
+    # 清單一致性（票 38 方案 D）。印在專案清單**之前**——底下每一行都建立在
+    # 「這份清單就是心跳用的那份」這個前提上，前提不成立的話先講。
+    $agreement = Get-ProjectListAgreement -ListPath $ListPath
+    if ($agreement -and -not $agreement.Agrees) {
+        foreach ($line in $agreement.Lines) { Write-Host $line }
+        Write-Host ""
+    }
 
     $state = Read-HeartbeatState -ListPath $ListPath
     Write-Host "登記的專案（共 $($entries.Count) 個）"

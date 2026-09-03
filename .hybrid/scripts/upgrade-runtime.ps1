@@ -199,13 +199,16 @@ try {
         exit $script:ExitOk
     }
 
-    $alreadyInstalled = Test-Path -LiteralPath (Join-Path $finalDir 'heartbeat.ps1')
+    # 「已經裝好了」不能只看目錄在不在——那等於相信版本字串代表內容（票 33）。
+    # 內容相同才跳過；不同就照常複製與自我驗證。
+    $alreadyInstalled = (Test-Path -LiteralPath (Join-Path $finalDir 'heartbeat.ps1')) -and
+                        (Test-RuntimeContentMatches -SourceRoot $SourceRoot -RuntimeVersionDir $finalDir)
     if ($alreadyInstalled) {
         # 上一次升級可能在「Move-Item 到最終位置」之後、「換指標」之前被中斷——
         # 那個版本目錄已經是完整、驗證過的（自我驗證在 Move-Item 之前一定跑過），
         # 不需要重新複製或重新驗證，直接跳到換指標（ADR-0008：3 之後、4 之前中斷
         # 是無害的，下一次升到同一版會偵測到並直接跳到換指標）。
-        Write-Host "版本 $toolVersion 已經在 $finalDir（可能是上一次升級中斷在換指標之前留下的），跳過複製與自我驗證。"
+        Write-Host "版本 $toolVersion 已經在 $finalDir 且內容與來源相同（可能是上一次升級中斷在換指標之前留下的），跳過複製與自我驗證。"
     } else {
         # 開頭無條件刪除同名 staging（Install-RuntimeFiles 內部已經做這件事，
         # 比照 git.ps1:175 對暫存 index 的處理）——重跑一次升級不需要先手動清理。
@@ -222,6 +225,21 @@ try {
         }
         Write-Host "自我驗證通過。"
 
+        # 目的地已存在時必須先刪掉。Move-Item -Force 對「已存在的目錄」的語義是
+        # **移進去**，不是覆蓋——結果會變成 runtime\<版本>\<版本>.staging\，
+        # 而外層那個舊版本目錄原封不動。
+        #
+        # 票 33 之前這條路徑走不到（版本目錄存在就一定跳過），所以這個問題一直被
+        # 遮著。現在內容不同時會重裝，它才浮出來。
+        #
+        # 刪除與移動之間有一個窗口：中斷的話這個版本目錄會不見。可以接受，因為
+        # (a) 自我驗證已經通過，staging 是完整的；(b) 派工器對「current 指向的目錄
+        # 不見了」已經有處理——退回 previous，退不了就本輪不處理任何專案（不會去跑
+        # 專案自帶的那份）；(c) 下一次升級會重新裝好。相對地，不刪就是靜靜地留下
+        # 一個舊版本，那才是無聲的錯誤。
+        if (Test-Path -LiteralPath $finalDir) {
+            Remove-Item -LiteralPath $finalDir -Recurse -Force
+        }
         Move-Item -LiteralPath $stagingDir -Destination $finalDir -Force
     }
 

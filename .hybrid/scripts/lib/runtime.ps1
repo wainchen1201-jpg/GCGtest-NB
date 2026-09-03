@@ -83,6 +83,76 @@ function Resolve-RuntimeSourceDir {
     throw "找不到 heartbeat.ps1：$SourceRoot 底下試過 scripts\heartbeat.ps1 與 heartbeat.ps1 都沒有"
 }
 
+function Test-RuntimeContentMatches {
+    # 已安裝的版本目錄，內容跟來源是不是同一份？
+    #
+    # 存在的理由：升級原本只看「目標版本目錄在不在」就決定跳過，等於相信
+    # **版本字串相同 ⇒ 內容相同**。三裝置真機試點把那個假設證偽了兩次——
+    # 兩台都回報 1.0.0 而內容差四個 commit；開工包與 repo 的 VERSION.json
+    # 甚至是同一顆雜湊，卻描述著三個檔案不同的兩棵樹（票 33）。
+    #
+    # 後果最嚴重的地方不是「跳過」本身，是**升級在最需要它的時候靜默地什麼都不做**。
+    #
+    # 比對範圍就是 Install-RuntimeFiles 會複製的那些，**刻意排除 VERSION.json**：
+    # 那個檔案由 Install-RuntimeFiles 自己重寫（加上 schemaMin/Max、installedAt、
+    # installedFrom），所以裝完之後必然跟來源不同——把它算進去等於每次都重裝，
+    # 「跳過」那條路徑就永遠走不到，中斷續跑的最佳化也就沒了。
+    #
+    # 任何一邊讀不動、或檔案集合對不起來，一律回 $false：這裡的「不確定」要往
+    # 重新安裝的方向倒，因為重裝的代價只是多花幾秒，而錯誤地跳過會留下一份
+    # 看起來裝好了、實際上是舊的 runtime。
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$RuntimeVersionDir
+    )
+    if (-not (Test-Path -LiteralPath $RuntimeVersionDir)) { return $false }
+
+    try {
+        $sourceDir = Resolve-RuntimeSourceDir -SourceRoot $SourceRoot
+    } catch {
+        return $false
+    }
+
+    # 來源這一側要比對的相對路徑清單（與 Install-RuntimeFiles 一致）。
+    $relatives = New-Object System.Collections.ArrayList
+    [void]$relatives.Add('heartbeat.ps1')
+    $libDir = Join-Path $sourceDir 'lib'
+    if (Test-Path -LiteralPath $libDir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $libDir -File -Recurse)) {
+            [void]$relatives.Add('lib\' + $f.FullName.Substring($libDir.Length).TrimStart('\'))
+        }
+    }
+    $policyName = 'preflight-policy.default.json'
+    if (Test-Path -LiteralPath (Join-Path $sourceDir $policyName)) {
+        [void]$relatives.Add($policyName)
+    }
+
+    foreach ($rel in $relatives) {
+        $a = Join-Path $sourceDir $rel
+        $b = Join-Path $RuntimeVersionDir $rel
+        if (-not (Test-Path -LiteralPath $b)) { return $false }
+        try {
+            $ha = (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash
+            $hb = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash
+        } catch {
+            return $false
+        }
+        if ($ha -ne $hb) { return $false }
+    }
+
+    # 目的地多出來的檔案也算不同——那可能是上一版留下的東西，而 runtime 目錄
+    # 是要拿去執行的，多一支來歷不明的腳本不該被當成「已經裝好了」。
+    # VERSION.json 是唯一的例外（它本來就由這裡重寫）。
+    $destFiles = @(Get-ChildItem -LiteralPath $RuntimeVersionDir -File -Recurse)
+    foreach ($f in $destFiles) {
+        $rel = $f.FullName.Substring($RuntimeVersionDir.Length).TrimStart('\')
+        if ($rel -eq 'VERSION.json') { continue }
+        if ($relatives -notcontains $rel) { return $false }
+    }
+
+    return $true
+}
+
 function Install-RuntimeFiles {
     # 把一份 runtime 原始檔複製到 $DestinationDir（呼叫端決定是 runtime\<版本>\
     # 還是 runtime\<版本>.staging\），並寫入 VERSION.json。**不寫 current.json**

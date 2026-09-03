@@ -121,13 +121,52 @@ try {
     # 「派工器是新的但沒有 runtime」會在正常路徑上出現，那正是這份設計要消滅的洞。
     Install-RuntimeFiles -SourceRoot $sourceRoot -DestinationDir $runtimeVersionDir -ToolVersion $toolVersion | Out-Null
 
+    # 自我驗證。原本這裡沒有，只有 upgrade-runtime.ps1 有——所以這支腳本裝的 runtime
+    # 從來沒被驗證過（票 37）。單獨看已經是個洞；票 33 之後它變成閉環：升級發現
+    # 內容相同就跳過，而跳過連帶跳過驗證，於是這份 runtime 在任何路徑上都不會被驗證。
+    #
+    # 「已經在那裡的版本必定驗證過」是票 33 那條捷徑的隱含前提。補上這裡，前提才成立。
+    Write-Host "自我驗證中……"
+    $verify = Test-SelfVerifyRuntime -RuntimeVersionDir $runtimeVersionDir
+    if (-not $verify.Ok) {
+        # 不假裝成功。這台機器沒有一份能跑的 runtime，而心跳完全靠它——
+        # 讓安裝「成功」結束會讓使用者以為裝好了，那正是票 35 那個事故的形狀。
+        Write-Host "自我驗證失敗，安裝中止。"
+        Write-Host "  exit code：$($verify.ExitCode)"
+        Write-Host "  輸出     ：$($verify.Output)"
+        Write-Host "  位置     ：$runtimeVersionDir"
+        exit $script:ExitFailed
+    }
+    Write-Host "自我驗證通過。"
+
     # 只在這台機器還沒有 current.json（或它讀不動）時才把指標寫過去——避免這支
     # 安裝器如果版本比艦隊目前已經升級到的版本舊，反而造成一次靜默降級。升級是
     # upgrade-runtime.ps1 明確前景指令的職責，不是這裡。
     $existingCurrent = Read-RuntimeCurrent -ListPath $ListPath
     $runtimeAlreadyCurrent = ($null -ne $existingCurrent) -and (-not (Test-Unreadable $existingCurrent))
+    $currentVersionNow = ''
     if (-not $runtimeAlreadyCurrent) {
         Write-RuntimeCurrent -ListPath $ListPath -Version $toolVersion -Previous ''
+        $currentVersionNow = $toolVersion
+    } else {
+        $currentVersionNow = [string](Get-PropertyOrDefault -InputObject $existingCurrent -Name 'version' -Default '')
+    }
+
+    if ($runtimeAlreadyCurrent -and $currentVersionNow -ne $toolVersion) {
+        # 原本這裡只說「指標沒有被改動」。那句話是對的，但它沒有回答使用者的下一個
+        # 問題：**那現在到底在跑哪一份？** 真機試點時兩台機器都停在這個狀態——
+        # 心跳從「死掉」變成「活著但跑舊碼」，而後者沒有任何訊號（票 37）。
+        #
+        # 不自動切是刻意的（避免安裝器比艦隊舊時靜默降級），而且不改：版本號比大小
+        # 這件事票 33 剛證明不能信。要補的是可見性。
+        Write-Host ""
+        Write-Host "  ⚠ 指標沒有被改動——這台機器實際在跑的還是 $currentVersionNow。"
+        Write-Host "    剛裝好的 $toolVersion 放在旁邊，還沒有被使用。"
+        Write-Host "    切換要用明確的前景指令（不提權）："
+        Write-Host "      powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\upgrade-runtime.ps1`""
+        Write-Host "    先加 -DryRun 可以看它會做什麼而不動任何東西。"
+        # 印在這裡而不是最後的摘要：註冊排程失敗（例如沒提權）時摘要根本印不到，
+        # 而「裝好了但沒在跑」這件事跟排程註冊成不成功無關。
     }
 
     # --- 舊制的殘留：一個專案一個排程項目 ---------------------------------
@@ -166,7 +205,7 @@ try {
     Write-Host "  清單     ：$(Get-ProjectListPath -ListPath $ListPath)（目前 $count 個專案）"
     Write-Host "  頻率     ：每 $IntervalMinutes 分鐘，登入時也會跑一次"
     Write-Host "  視窗     ：不會出現（wscript 沒有 console）"
-    Write-Host "  runtime  ：$toolVersion（$runtimeVersionDir）$(if ($runtimeAlreadyCurrent) { '——這台機器已經在跑別的版本，指標沒有被改動' } else { '' })"
+    Write-Host "  runtime  ：$toolVersion（$runtimeVersionDir）"
     Write-Host ""
     Write-Host "這是這台機器唯一需要提權的一次。之後新增專案只要開工，"
     Write-Host "它會自動把專案加進清單——不需要管理員權限。"
