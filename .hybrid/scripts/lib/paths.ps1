@@ -153,7 +153,19 @@ function Write-DriveOrigin {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Remote,
         [Parameter(Mandatory)][AllowEmptyString()][string]$MainBranch,
         [AllowEmptyString()][string]$ProjectUuid = '',
-        [AllowEmptyString()][string]$DisplayName = ''
+        [AllowEmptyString()][string]$DisplayName = '',
+        # 這一次寫入時，對這個 remote 的推送成不成功。$null = 沒有推送這件事
+        # （開工在寫、或這台根本沒有 remote），**不是**「失敗」——兩者要分開。
+        #
+        # 為什麼要記（票 39）：推送失敗的收工仍然會把那個位址寫成專案身分並散給其他
+        # 裝置。下一台開工時拿它跟自己的 remote 比對、被擋——而被擋的那台什麼都沒
+        # 做錯，卻拿不到「為什麼會這樣」的線索。
+        #
+        # 為什麼不是「推送失敗就不更新 remote」：推送失敗有很多原因跟位址對不對無關
+        # （網路、認證、遠端暫時掛掉）。那樣做會把「網路問題」與「位址錯誤」混為一談。
+        # 而且這個檔案的用途是「這個專案的家在哪」——那是設定，不是「上次成功推到哪」
+        # 的紀錄。所以照寫，但把事實一起記下來。
+        [AllowNull()][Nullable[bool]]$LastPushOk = $null
     )
     $existing = Read-DriveOrigin -ProjectDrivePath $ProjectDrivePath
     if (Test-Unreadable $existing) {
@@ -179,7 +191,7 @@ function Write-DriveOrigin {
         $mainBranchToWrite = Get-PropertyOrDefault -InputObject $existing -Name 'mainBranch' -Default ''
     }
 
-    $json = ConvertTo-Json ([ordered]@{
+    $record = [ordered]@{
         projectId   = $ProjectId
         projectUuid = $uuidToWrite
         displayName = $displayNameToWrite
@@ -187,7 +199,11 @@ function Write-DriveOrigin {
         mainBranch  = $mainBranchToWrite
         updatedAt   = (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz')
         updatedBy   = $env:COMPUTERNAME
-    })
+    }
+    # 只在呼叫端真的知道結果時才寫這個欄位。沿用既有值的機制在這裡不適用——
+    # 「上一次推送成不成功」是這一次寫入當下的事實，沿用舊值等於說謊。
+    if ($null -ne $LastPushOk) { $record['lastPushOk'] = [bool]$LastPushOk }
+    $json = ConvertTo-Json $record
 
     # 原子寫入（ADR-0007 不變量 6）：先寫暫存檔再 Move-Item，跟 Write-ProjectList
     # （registry.ps1）同一個手法。origin.json 讀者（Read-DriveOrigin、心跳、遷移工具

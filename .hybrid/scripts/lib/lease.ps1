@@ -296,6 +296,29 @@ function Undo-LeaseAcquisition {
     return 'undone'
 }
 
+function Set-LeaseReleasing {
+    # 標記「這台正在收工，git 那半已經推上去了，只差人確認 Drive 同步」。
+    #
+    # **刻意不新增 status 值。** 票 36 原本提議 `status: releasing`，實作前查了
+    # Get-LeaseState 才發現那很危險：
+    #
+    #     if ($status -ne 'held') { return 'released' }
+    #
+    # 舊版 runtime 讀到 releasing 會判成「已釋放、可以拿」——不是我們假設的
+    # 「不認得就阻擋」。一台還在收工的機器會被舊版的另一台當成空租約直接接手，
+    # 而那正是租約存在要防的事。票 33 的教訓在這裡又成立一次：不要假設別台跑哪一版。
+    #
+    # 所以 status 維持 held（舊版照樣阻擋，保守而正確），另外加一個舊版不認得、
+    # 會被直接忽略的欄位。**向後相容靠結構保證，不靠約定。**
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)]$Lease
+    )
+    Set-LeaseProperty -Lease $Lease -Name 'releasingSince' -Value ((Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'))
+    Write-LeaseAtomic -ProjectRoot $ProjectRoot -Record $Lease | Out-Null
+    return $Lease
+}
+
 function Set-LeaseReleased {
     # 釋放不是刪檔，是把狀態改掉並留下痕跡：releasedBy 跟持有者的 sessionId 不一樣
     # 時，一眼就看得出那一筆是代理收工替別台裝置收的（票 06 靠這個，ADR-0006 沿用）。
@@ -314,6 +337,11 @@ function Set-LeaseReleased {
     )
     $identity = $Identity
     Set-LeaseProperty -Lease $Lease -Name 'status' -Value 'released'
+    # 已經釋放了就不該還留著「正在收工」——那是過渡狀態的標記，
+    # 留著會讓下一個讀的人以為對方還在收工。
+    if ($Lease.PSObject.Properties['releasingSince']) {
+        $Lease.PSObject.Properties.Remove('releasingSince')
+    }
     Set-LeaseProperty -Lease $Lease -Name 'releasedAt' -Value ((Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'))
     Set-LeaseProperty -Lease $Lease -Name 'releasedBy' -Value $SessionId
     Set-LeaseProperty -Lease $Lease -Name 'releasedByDevice' -Value $identity.DeviceName

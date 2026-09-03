@@ -430,6 +430,17 @@ try {
             Write-Host "  這台的 remote        ：$remoteForIdentityCheck"
             Write-Host "  origin.json 的 remote：$driveRemoteForCheck"
             Write-Host ""
+            # 被擋的那台什麼都沒做錯，它需要的是「為什麼會這樣」。Drive 那份如果是在
+            # 一次推送失敗的收工寫進去的，那很可能就是原因——那次收工推不到它（票 39）。
+            $driveLastPushOk = $null
+            if ($driveOriginForRemoteCheck -and $driveOriginForRemoteCheck.PSObject.Properties['lastPushOk']) {
+                $driveLastPushOk = [bool]$driveOriginForRemoteCheck.lastPushOk
+            }
+            if ($null -ne $driveLastPushOk -and -not $driveLastPushOk) {
+                Write-Host "線索：Drive 上那個位址是在一次**推送沒有成功**的收工寫進去的。"
+                Write-Host "      那次收工推不到它，所以它比較可能是錯的那一個。"
+                Write-Host ""
+            }
             Write-Host "不猜、不覆蓋——請確認哪一個才是對的，必要時手動修正 origin.json 或這台的 git remote。"
             exit $script:ExitNeedsYou
         }
@@ -533,7 +544,13 @@ try {
                     'other' {
                         $liveness = Get-LeaseLiveness -ProjectRoot $ProjectRoot -Lease $leaseForValidation
                         $holderName = Get-PropertyOrDefault -InputObject $leaseForValidation -Name 'deviceName' -Default (Get-PropertyOrDefault -InputObject $leaseForValidation -Name 'device' -Default '（未記錄）')
+                        $releasingSince = Get-PropertyOrDefault -InputObject $leaseForValidation -Name 'releasingSince' -Default ''
                         Write-Host "停下來了：$holderName 持有這個專案的租約。"
+                        if ($releasingSince) {
+                            # 「正在收工」跟「忘記收工」的下一步不同，訊息不能混（票 36）。
+                            Write-Host "  狀態：對方正在收工（自 $releasingSince），還沒確認 Drive 同步完成。"
+                            Write-Host "        它的變更**已經推上主線了**，不會遺失——缺的只是那一句人工確認。"
+                        }
                         Write-Host "  判定：$($liveness.State)（$($liveness.Detail)）"
                         Write-Host ""
                         switch ($liveness.State) {

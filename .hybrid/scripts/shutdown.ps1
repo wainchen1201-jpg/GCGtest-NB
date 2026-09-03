@@ -256,6 +256,10 @@ try {
                 Set-LeaseReleased -ProjectRoot $ProjectRoot -Lease $lease -SessionId $sessionId -Identity $deviceIdentity | Out-Null
                 $leaseState = 'released'
             } else {
+                # 標記「正在收工」——git 已經推上去了，只差人確認 Drive 同步。
+                # 這讓接手的一方分得出「對方正在收工」與「對方忘記收工」：
+                # 前者的 git 那半是安全的，代理收工不必警告「拿不回未提交的變更」。
+                Set-LeaseReleasing -ProjectRoot $ProjectRoot -Lease $lease | Out-Null
                 $leaseState = 'held-pending-sync'
             }
         } else {
@@ -284,7 +288,13 @@ try {
             $probe = Invoke-Git -ProjectRoot $ProjectRoot -Arguments @('remote', 'get-url', 'origin')
             if ($probe.ExitCode -eq 0) { $remoteNow = $probe.Output }
         }
+        # 把這一次推送的結果一起記下來（票 39）。'pushed' 是成功、'failed' 是失敗；
+        # 'no-remote' / 'no-commits' 是「根本沒有推送這件事」，那不該記成失敗。
+        $pushOkForOrigin = $null
+        if ($pushState -eq 'pushed') { $pushOkForOrigin = $true }
+        elseif ($pushState -eq 'failed') { $pushOkForOrigin = $false }
         $resumedOriginPartial = Write-DriveOrigin -ProjectDrivePath $linkPath -ProjectId $projectId `
+            -LastPushOk $pushOkForOrigin `
             -Remote $remoteNow -MainBranch $mainline -DisplayName (Split-Path -Leaf $ProjectRoot)
     }
 

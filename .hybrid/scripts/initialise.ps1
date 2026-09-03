@@ -98,6 +98,48 @@ function Copy-TemplateBundle {
         }
         Copy-Item -Path (Join-Path $sourceSkill '*') -Destination $targetSkill -Recurse -Force
     }
+
+    # bundle 自己的版本身分（票 40）。三種形狀裡版本住的位置不同：repo 在 scripts\
+    # 的上一層（package.json）、開工包在同一層（VERSION.json）、而專案 bundle
+    # **本來哪裡都沒有**。後果有兩種，實測都撞到過：
+    #
+    #   * 從開工包來的 bundle 帶著 VERSION.json，用 repo 的 initialise -Force 更新它，
+    #     上面那個 Remove-Item 會把它洗掉——於是 bundle 裡的 install-heartbeat.ps1
+    #     從「本來能跑」變成「找不到工具版本」。
+    #   * 用 repo 開的新專案，bundle 從來就沒有版本檔，那支腳本出廠就是死的。
+    #
+    # 所以複製完就寫一份。記的是**這一次的來源版本**，不是沿用 bundle 裡原本的舊值——
+    # 票 33 那個事故就是版本字串與內容對不上：沿用舊值會讓它繼續說謊。
+    #
+    # 讀不到來源版本時不寫、也不讓初始化失敗：bundle 的版本身分是診斷用的，
+    # 缺了它比整個初始化倒掉好。但要回報，不要靜靜跳過（呼叫端負責印）。
+    $bundleVersionWritten = $false
+    try {
+        $versionRoot = Get-ToolVersionRoot -ScriptRoot $sourceScripts
+        $sourceVersion = Get-ToolVersion -Root $versionRoot
+        # 來源的**形狀**，不是它的路徑。這個檔案進版控、會被推到遠端、會散到每一台
+        # 裝置——而別人機器上的來源路徑長 C:\Users\<使用者名稱>\...，那等於把使用者
+        # 名稱寫進一個可能是公開的 repo。形狀才是診斷時真正想知道的
+        # （「這份 bundle 是從模板 repo 來的還是從開工包來的」），而它不帶任何個資。
+        $sourceKind = if (Test-Path -LiteralPath (Join-Path $versionRoot 'package.json')) {
+            'template-repo'
+        } else {
+            'bootstrap-package'
+        }
+        Write-Utf8NoBom -Path (Join-Path $targetScripts 'VERSION.json') -Content (
+            ConvertTo-Json ([ordered]@{
+                toolVersion = $sourceVersion
+                copiedFrom  = $sourceKind
+                copiedAt    = (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz')
+            })
+        )
+        $bundleVersionWritten = $true
+    } catch {
+        Write-Host "  ⚠ bundle 的版本檔沒寫成：$($_.Exception.Message)"
+        Write-Host "    專案自帶的 install-heartbeat.ps1 會因此找不到工具版本。"
+    }
+
+    if (-not $bundleVersionWritten) { return 'copied-without-version' }
     return 'copied'
 }
 
@@ -354,6 +396,10 @@ try {
         # 更新，得去模板 repo 對這個專案跑 initialise.ps1 -Force -ProjectRoot <這個專案>。
         'skipped' { '來源與目標路徑相同，沒有複製——bundle 沒有被更新到；如果是想拿到模板最新版，改去模板 repo 對這個專案跑 initialise.ps1 -Force -ProjectRoot' }
         'missing' { '找不到模板的 scripts/，沒有複製' }
+        # 腳本進去了，但 bundle 沒有版本身分——`install-heartbeat.ps1` 會因此失敗（票 40）。
+        # 這不是「複製失敗」，所以下一步照樣要告訴使用者 bundle 能用；但也不能報成
+        # 一切正常，那正是無聲失效的第一種形態。
+        'copied-without-version' { '腳本與 skill 已複製，但 bundle 的版本檔沒寫成（見上方警告）——專案自帶的 install-heartbeat.ps1 會失敗' }
         default   { $bundleState }
     }
     Write-Host "  自帶工具   ：$bundleLabel"
@@ -362,7 +408,7 @@ try {
     Write-Host "  1. 執行「開工」建立 _drive/ 的 junction。在那之前專案裡還沒有 _drive/。"
     # 只有真的複製進去了才敢這樣講。沒複製成功時照樣印這一句，等於指著一支不存在的
     # 腳本叫使用者去跑——而且會在「換裝置」那一刻才爆，離現場最遠。
-    if ($bundleState -in @('copied', 'skipped')) {
+    if ($bundleState -in @('copied', 'skipped', 'copied-without-version')) {
         Write-Host "     這個專案自帶腳本，換裝置後直接跑 .hybrid\scripts\startup.ps1 就行。"
     } else {
         Write-Host "     這個專案**沒有**自帶腳本（$bundleLabel），換裝置後必須另外準備一份工具。"

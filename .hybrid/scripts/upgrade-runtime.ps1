@@ -62,9 +62,25 @@ $OutputEncoding = New-Object System.Text.UTF8Encoding $false
 . (Join-Path $PSScriptRoot 'lib\version.ps1')
 
 # 預設來源同樣要認得兩種形狀（模板 repo 的上一層、開工包的同一層）。
-# 必須排在 dot-source 之後——Get-ToolVersionRoot 定義在 version.ps1 裡。擺在前面時
-# 函式還不存在，而且連 -Rollback 這種根本用不到 SourceRoot 的路徑都會一起炸掉。
-if (-not $SourceRoot) { $SourceRoot = Get-ToolVersionRoot -ScriptRoot $PSScriptRoot }
+# 必須排在 dot-source 之後——Get-ToolVersionRoot 定義在 version.ps1 裡。
+#
+# **而且只有真的需要來源的模式才解析。** -Rollback 只讀 current.json 的 previous、
+# -RefreshBundle 把工作委給 Invoke-RefreshProjectBundle（只吃 ListPath 與 ProjectRoot），
+# 兩者都不碰 $SourceRoot。
+#
+# 這一點不是潔癖：Get-ToolVersionRoot 找不到版本檔時會 throw，而這一行在 try 之外，
+# 配上 $ErrorActionPreference = 'Stop' 就是印堆疊、非零離開。專案自帶的
+# .hybrid\scripts\ 底下沒有 VERSION.json、上一層 .hybrid\ 也沒有——於是從那個位置
+# 跑 -Rollback 會在「解析一個它不需要的參數」時死掉，**回滾一次都沒發生**。
+#
+# 而那正是最需要它的情境：install-heartbeat 不會把這支腳本複製到機器層級，
+# 所以手上只有專案、runtime 又出了問題的人，會反射性地去 .hybrid\scripts\ 找它。
+#
+# 舊寫法 Split-Path -Parent 對這兩個模式算出來的是垃圾路徑，但永遠不會 throw，
+# 所以那條逃生門本來是通的——是這次改動把它關上的。
+if (-not $Rollback -and -not $RefreshBundle -and -not $SourceRoot) {
+    $SourceRoot = Get-ToolVersionRoot -ScriptRoot $PSScriptRoot
+}
 
 function Remove-OldRuntimeVersions {
     # 保留最近三版，超過才刪最舊的，且永不刪 current 與 previous（ADR-0008「回滾」段）。
@@ -266,7 +282,21 @@ try {
     # 回滾是出事時才會用到的東西，而它壞掉的方式是一次成功的操作。
     $isSameVersion = ($currentBefore -eq $toolVersion) -and $currentBefore
     $previousVersion = if ($isSameVersion) { $previousBefore } else { $currentBefore }
-    Write-RuntimeCurrent -ListPath $ListPath -Version $toolVersion -Previous $previousVersion
+
+    # no-op 時**完全不寫**，不是「寫回同樣的值」。
+    #
+    # 先前只保住了 previous，但 Write-RuntimeCurrent 仍然會重寫 switchedAt——
+    # 於是那一次的訊息說「指標沒有變動」，而檔案裡的時間戳往前跳了兩秒。
+    #
+    # switchedAt 的語義是「指標**切換**的時間」。一次沒有切換的執行把它往前推，
+    # 等於記錄了一個「這一刻發生過切換」的事實，而那一刻什麼都沒發生。之後要追
+    # 「這台機器什麼時候換到 X 的」，它會回答「最後一次有人跑過升級的時間」。
+    #
+    # 既然訊息已經明確宣稱「沒有變動」，讓它成真比改那句話便宜——而且那句話是對的，
+    # 該改的是行為。
+    if (-not $isSameVersion) {
+        Write-RuntimeCurrent -ListPath $ListPath -Version $toolVersion -Previous $previousVersion
+    }
 
     # @() 包起來：Remove-OldRuntimeVersions 沒有東西要刪時 `return $removed.ToArray()`
     # 送出的是零個管線物件，不包的話 $removedVersions 會被解成 $null，
