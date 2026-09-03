@@ -176,8 +176,13 @@ function Get-ProjectListAgreement {
     $seenBytes = [int]$sizeMatch.Groups[1].Value
     $seenCount = if ($countMatch.Success) { [int]$countMatch.Groups[1].Value } else { -1 }
 
-    $listPath = Get-ProjectListPath -ListPath $ListPath
-    if (-not (Test-Path -LiteralPath $listPath)) {
+    # **不要叫它 $listFilePath。** PowerShell 的變數名不分大小寫，那個名字會覆寫參數
+    # $ListPath（家目錄），於是下一行的 Read-ProjectList 拿到的是檔案路徑、再往下
+    # 多接一層，找不到檔案而安靜回空的——真機上這裡印出「0 個專案」，而同一次
+    # 輸出底下的「登記的專案（共 2 個）」說 2。同一支腳本對同一件事給了兩個答案，
+    # 而那段訊息的全部說服力正來自「兩個觀察值不相等」。
+    $listFilePath = Get-ProjectListPath -ListPath $ListPath
+    if (-not (Test-Path -LiteralPath $listFilePath)) {
         return [pscustomobject]@{
             Agrees = $false
             Lines = @(
@@ -186,7 +191,7 @@ function Get-ProjectListAgreement {
             )
         }
     }
-    $nowBytes = (Get-Item -LiteralPath $listPath -Force).Length
+    $nowBytes = (Get-Item -LiteralPath $listFilePath -Force).Length
     $nowCount = @(Read-ProjectList -ListPath $ListPath).Count
 
     if ($seenBytes -eq $nowBytes) { return [pscustomobject]@{ Agrees = $true; Lines = @() } }
@@ -198,7 +203,7 @@ function Get-ProjectListAgreement {
             "清單不一致：**你讀到的清單，跟心跳讀到的不是同一份。**",
             "  派工器上一輪看到：$seenBytes 位元組$countPart",
             "  這個行程看到的  ：$nowBytes 位元組，$nowCount 個專案",
-            "  路徑            ：$listPath",
+            "  路徑            ：$listFilePath",
             '  同一個路徑在兩個行程眼中是不同的檔案。常見成因：這個行程跑在封裝或沙箱',
             '  環境裡（讀寫被重導向到私有副本）、權限不同、或環境變數解析到別的位置。',
             '  後果：從這裡做的登記，排程的心跳看不到。'
