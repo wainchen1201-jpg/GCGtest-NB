@@ -208,7 +208,7 @@ try {
         # 那個版本目錄已經是完整、驗證過的（自我驗證在 Move-Item 之前一定跑過），
         # 不需要重新複製或重新驗證，直接跳到換指標（ADR-0008：3 之後、4 之前中斷
         # 是無害的，下一次升到同一版會偵測到並直接跳到換指標）。
-        Write-Host "版本 $toolVersion 已經在 $finalDir 且內容與來源相同（可能是上一次升級中斷在換指標之前留下的），跳過複製與自我驗證。"
+        Write-Host "版本 $toolVersion 已經在 $finalDir 且內容與來源相同（可能是重複執行升級，也可能是上一次升級中斷在換指標之前留下的），跳過複製與自我驗證。"
     } else {
         # 開頭無條件刪除同名 staging（Install-RuntimeFiles 內部已經做這件事，
         # 比照 git.ps1:175 對暫存 index 的處理）——重跑一次升級不需要先手動清理。
@@ -244,10 +244,28 @@ try {
     }
 
     $existingCurrent = Read-RuntimeCurrent -ListPath $ListPath
-    $previousVersion = ''
+    $currentBefore = ''
+    $previousBefore = ''
     if (($null -ne $existingCurrent) -and (-not (Test-Unreadable $existingCurrent))) {
-        $previousVersion = Get-PropertyOrDefault -InputObject $existingCurrent -Name 'version' -Default ''
+        $currentBefore = Get-PropertyOrDefault -InputObject $existingCurrent -Name 'version' -Default ''
+        $previousBefore = Get-PropertyOrDefault -InputObject $existingCurrent -Name 'previous' -Default ''
     }
+
+    # 已經就是目標版本時（重跑同一個指令），這次「換指標」是 no-op——**不要動 previous**。
+    #
+    # 舊寫法無條件把 previous 設成舊的 current，於是重跑一次就把
+    # previous 踩成自己：`{"version":"1.2.1","previous":"1.2.1"}`。目錄都還在，
+    # 所以 ADR-0008 的「永不刪 current 與 previous」沒被違反，但 previous 從此
+    # 指不到任何不同的東西——回滾的能力在資料上還在，在指標上已經沒了。
+    #
+    # 真機上是這樣被抓到的：先升到 1.2.1（previous 記 1.0.0），再跑一次同一個指令
+    # 驗票 33 的跳過路徑，previous 就變成 1.2.1。而那一次是 exit 0、訊息還說
+    # 「（原本是 1.2.1，仍保留）」——字面上為真（1.2.1 確實保留著），
+    # 但它讀起來像「你的上一版安全地留著」，實際發生的是「你的上一版被這個值取代了」。
+    #
+    # 回滾是出事時才會用到的東西，而它壞掉的方式是一次成功的操作。
+    $isSameVersion = ($currentBefore -eq $toolVersion) -and $currentBefore
+    $previousVersion = if ($isSameVersion) { $previousBefore } else { $currentBefore }
     Write-RuntimeCurrent -ListPath $ListPath -Version $toolVersion -Previous $previousVersion
 
     # @() 包起來：Remove-OldRuntimeVersions 沒有東西要刪時 `return $removed.ToArray()`
@@ -255,7 +273,12 @@ try {
     # 下面 .Count 在 StrictMode 下直接炸掉（registry.ps1 warned 過同一個坑）。
     $removedVersions = @(Remove-OldRuntimeVersions -ListPath $ListPath -Current $toolVersion -Previous $previousVersion)
 
-    Write-Host "升級完成：current 現在是 $toolVersion$(if ($previousVersion) { "（原本是 $previousVersion，仍保留）" } else { '' })"
+    if ($isSameVersion) {
+        # 不要說「原本是 X」——那會把一次 no-op 講成一次版本變更。
+        Write-Host "current 本來就是 $toolVersion，指標沒有變動$(if ($previousVersion) { "（可回滾到 $previousVersion）" } else { '' })。"
+    } else {
+        Write-Host "升級完成：current 現在是 $toolVersion$(if ($previousVersion) { "（原本是 $previousVersion，仍保留）" } else { '' })"
+    }
     if ($removedVersions.Count -gt 0) {
         Write-Host "已清掉超過保留上限的舊版本：$($removedVersions -join '、')"
     }

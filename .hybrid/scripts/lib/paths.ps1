@@ -378,6 +378,14 @@ function Read-ProjectManifest {
 
 function Get-PropertyOrDefault {
     # StrictMode 下直接讀不存在的屬性會炸，而 project.json 的欄位會隨版本增加。
+    #
+    # **注意：這個函式用 truthiness 判斷「有沒有值」，所以數值 0 會被當成沒有值。**
+    # 它的設計對象是字串欄位——那裡「空字串」與「不存在」要求同樣的處理，合在一起是對的。
+    # 但如果欄位是數字而 0 是一個有意義的值（例如 schema 版本 0 表示「根本沒有 manifest」），
+    # 這個函式會回給你預設值，而你不會收到任何警告。實測踩過一次。
+    #
+    # 那種欄位要直接看屬性在不在：
+    #   if ($obj -and $obj.PSObject.Properties['欄位']) { [int]$obj.欄位 }
     param(
         $InputObject,
         [Parameter(Mandatory)][string]$Name,

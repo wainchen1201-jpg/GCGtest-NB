@@ -254,7 +254,26 @@ function Get-ProjectHealth {
                     'preflight 持續擋下（心跳沒有 override，需要收工時處理）'
                 }
             }
-            'skipped-by-version' { '專案與這台機器的 runtime schema 不相容，持續被跳過——需要升級專案或這台的 runtime（upgrade-runtime.ps1）' }
+            'skipped-by-version' {
+                # schema 0 不是「版本太舊」，是**根本沒有 .hybrid\project.json**——
+                # 通常是清單裡的殘留條目（那個目錄被刪掉或換成別的東西了）。
+                #
+                # 兩者的下一步完全不同，而給錯的那個是可執行的：照著跑 upgrade-runtime
+                # 會 exit 0、然後什麼都沒改變。ADR-0005 說「說得出下一步才有資格擋」——
+                # 說得出一個**做不到的**下一步，比說不出更糟。
+                # 不能用 Get-PropertyOrDefault：它靠 truthiness 判斷有沒有值，
+                # 而 schema **0 本身就是我們要分辨的那個值**，在 PowerShell 裡 0 是 falsy，
+                # 於是會拿到預設值。這裡直接看屬性在不在。
+                $schemaSeen = -1
+                if ($State -and $State.PSObject.Properties['skippedByVersionSchema']) {
+                    $schemaSeen = [int]$State.skippedByVersionSchema
+                }
+                if ($schemaSeen -eq 0) {
+                    '這個路徑不是 hybrid workspace 專案（讀不到 .hybrid\project.json），持續被跳過——通常是清單裡的殘留條目，用 leave-device.ps1 把它移除'
+                } else {
+                    '專案與這台機器的 runtime schema 不相容，持續被跳過——需要升級專案或這台的 runtime（upgrade-runtime.ps1）'
+                }
+            }
             'skipped-by-policy'  { 'preflight 政策檔持續讀不動或版本不認得，持續被跳過' }
             'rejected-by-lease'  {
                 # 這條分支只有這台裝置會寫（票 26 的 wip/<deviceId>-<工作目錄雜湊>
