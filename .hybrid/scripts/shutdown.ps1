@@ -92,6 +92,7 @@ try {
     }
 
     Assert-DriveLinkIgnored -ProjectRoot $ProjectRoot
+    Assert-NoContentThroughJunction -ProjectRoot $ProjectRoot
 
     # --- 壓縮並併進主線 ---------------------------------------------------
     $mainline = Get-CurrentBranch -ProjectRoot $ProjectRoot

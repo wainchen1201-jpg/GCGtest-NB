@@ -130,6 +130,28 @@ try {
     # --- 先讓使用者看見對方留下了什麼 -------------------------------------
     Write-Host "代理收工：$holder"
     Write-Host "  租約取得於 ：$acquiredAt"
+
+    # 【票 30 F9】對方正在收工（票 36 的 releasingSince）。
+    #
+    # 這是票 36 驗收條件的第四條，那張票被標成 done 但**這一條從來沒有實作**——
+    # 勾選框也一個都沒打過。這一輪對抗審查才發現。
+    #
+    # 為什麼要分：收工第一段做完之後，對方已經 commit、push、併進主線了，
+    # 只差人確認 Drive 同步。這時底下那句「沒提交的變更還困在那裡」**是假的**
+    # ——東西已經在主線上了。而它同時是最容易讓人決定「那就代理收工吧」的一句話。
+    $releasingSince = Get-PropertyOrDefault -InputObject $lease -Name 'releasingSince' -Default ''
+    if ($releasingSince) {
+        Write-Host "  狀態       ：**正在收工**（自 $releasingSince）"
+        Write-Host ""
+        Write-Host "  $holder 已經走完收工的第一段：變更提交了、推上主線了。"
+        Write-Host "  它缺的只是一句人工確認（Drive 同步完成），不是缺這台幫它做什麼。"
+        Write-Host ""
+        Write-Host "  所以這裡**沒有東西困在那台機器上**——代理收工在這個狀態下只會做一件事："
+        Write-Host "  提早釋放它的租約。如果它其實還在同步，那句確認就被跳過了。"
+        Write-Host ""
+        Write-Host "  建議先問對方一聲。真的聯絡不上再帶 -Confirmed。"
+    }
+
     if ($heartbeat.Found) {
         Write-Host "  心跳分支   ：$($heartbeat.Ref)"
         Write-Host "  最後一筆   ：$($heartbeat.LastCommit)"
@@ -140,6 +162,10 @@ try {
             Write-Host "  它動過的東西："
             foreach ($line in ($stat.Output -split "`n")) { Write-Host "    $($line.Trim())" }
         }
+    } elseif ($releasingSince) {
+        # 正在收工的機器，心跳分支已經被它自己收掉了——那是收工第一段做的事，
+        # 不是「心跳從沒跑過」。印成後者會把一個正常的中間狀態說成故障。
+        Write-Host "  心跳分支   ：$($heartbeat.Ref) 不存在（它收工時自己收掉了，這是正常的）"
     } else {
         Write-Host "  心跳分支   ：$($heartbeat.Ref) 不存在"
         Write-Host ""
@@ -268,7 +294,13 @@ try {
     Write-Host "  主線     ：$mainline（$pushLabel）"
     Write-Host "  租約     ：已釋放（紀錄裡留著 releasedByDevice = $device）"
 
-    if (-not $heartbeat.Found) {
+    # 【票 30 F9】同一句話在收尾這裡也要分。對方正在收工時它已經推完了，
+    # 「沒被取回」是假的——而且這一句是最後看到的，語氣最重。
+    if ($releasingSince) {
+        Write-Host ""
+        Write-Host "$holder 的變更**已經在主線上**（它自己推的），這次只是替它把租約放掉。"
+        Write-Host "如果它其實還在等 Drive 同步完成，那一段沒有人確認過——記得問它一聲。"
+    } elseif (-not $heartbeat.Found) {
         Write-Host ""
         Write-Host "再說一次：$holder 上沒提交的變更沒有被取回，它們還在那台機器上。"
     }

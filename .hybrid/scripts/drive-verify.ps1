@@ -28,15 +28,27 @@
     什麼」。有任何檔案讀不到（Unreadable）時拒絕寫入：用不完整的掃描結果覆蓋基準線，
     等於讓那些檔案從此不再被追蹤，卻不會有任何訊息告訴你。
 
+    有檔案在基準線裡、現在掃描不到（Missing）時同樣拒絕寫入，除非明確加上
+    -AcceptMissing（票 30）。
+
+.PARAMETER AcceptMissing
+    承認「遺失的那些檔案確實不在了」，允許 -Generate 把它們從基準線裡拿掉。
+
+    這是破壞性的：舊 manifest 沒有備份，覆寫之後那筆紀錄回不來。所以跟收工的
+    -DriveSynced、撤離的 -Confirmed 一樣，要人明講——工具分不出「被刪掉」與
+    「還沒同步下來」，而那兩者要求相反的動作。
+
 .OUTPUTS
     exit 0 = 完成，沒有需要你判斷的事；1 = 失敗；2 = 停下來了，需要你判斷
-    （出現差異、缺少基準線、或讀不到既有的 manifest／Drive 端目錄）。
+    （出現差異、缺少基準線、讀不到既有的 manifest／Drive 端目錄，或有遺失的
+    檔案而沒有加 -AcceptMissing）。
 #>
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = (Get-Location).Path,
     [string]$DriveRoot,
-    [switch]$Generate
+    [switch]$Generate,
+    [switch]$AcceptMissing
 )
 
 Set-StrictMode -Version 2.0
@@ -180,6 +192,29 @@ try {
             Write-Host "停下來了：$($scan.Unreadable.Count) 個檔案讀不到，-Generate 不會用不完整的掃描結果覆蓋 manifest。"
             Write-Host "那樣會讓這些檔案從基準線裡悄悄消失，之後也不會再被追蹤。"
             Write-Host "等它們變成可讀（例如 Google Drive 同步／下載完成，或解除鎖定）之後再重跑。"
+            exit $script:ExitNeedsYou
+        }
+
+        # 【票 30 對抗審查】上面那道守衛擋的是「讀不到」，而「遺失」原本沒有同一道。
+        # 於是素材被刪（或 Drive 那一側同步出問題）之後跑一次 -Generate，
+        # 那些檔案就從基準線裡消失了——而 integrity.ps1 自己的註解寫著
+        # 「manifest 一旦被覆寫，舊版本記錄的『上一次的狀態』就回不來了」。
+        #
+        # 最糟的是它在覆寫之前才剛印過這段話：
+        #   「『遺失』在這裡分不出兩種情況……本工具不會替你猜，也不會自動處理。」
+        # **然後它就處理了。** 訊息說不替你決定，接著就替你決定了——
+        # 這正是這條線一路在拆的無聲失效第二形態，只是這次出現在結構上而不是措辭上。
+        #
+        # 照這個 repo 既有的慣例辦：破壞性的那一半要明講（收工要 -DriveSynced、
+        # 撤離要 -Confirmed）。預設拒絕，要接受就加 -AcceptMissing。
+        if ($diff -and $diff.Missing.Count -gt 0 -and -not $AcceptMissing) {
+            Write-Host "停下來了：有 $($diff.Missing.Count) 個檔案在基準線裡、現在掃描不到，-Generate 不會直接覆寫。"
+            Write-Host "覆寫之後它們會從基準線裡消失，而舊的 manifest 沒有備份——那筆紀錄就回不來了。"
+            Write-Host ""
+            Write-Host "先確認它們是哪一種："
+            Write-Host "  * Google Drive 還沒同步下來 → 等同步完成再重跑，不要接受"
+            Write-Host "  * 真的被刪掉了、而且那是你要的 → 加上 -AcceptMissing 重跑"
+            Write-Host "  * 真的被刪掉了、但不是你要的 → 先用 drive-restore.ps1 看能不能找回來"
             exit $script:ExitNeedsYou
         }
 

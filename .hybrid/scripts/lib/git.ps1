@@ -137,27 +137,58 @@ function ConvertTo-RemoteIdentity {
     # 大量使用這種 origin）回 $null，呼叫端把它當成「無法比對」，不是「不符」。
     # 這不是漏洞：這個檢查要抓的是「同一個 GitHub/GitLab 之類的 host 上，owner/repo
     # 被換掉了」，本機路徑從一開始就沒有 owner/repo 這個概念可以比對。
+    # 【票 30 F7】原本兩條正則都寫死「host 後面剛好兩段」（`owner/repo`），
+    # 也就是只認得 GitHub／Bitbucket 那種扁平形狀。實測（探針，13 種真實 URL）：
+    #
+    #   github.com/owner/repo               → 解析得出
+    #   gitlab.com/group/subgroup/repo      → **解析不出**
+    #   dev.azure.com/org/project/_git/repo → **解析不出**
+    #   server/gitea/org/team/repo          → **解析不出**
+    #
+    # 而解析不出來的下一步是「無法比對，不阻擋」。所以**用 GitLab 子群組或
+    # Azure DevOps 的人，這道保護從來沒有生效過，而且沒有任何訊息說「我沒比」**
+    # ——無聲失效的第一種形態，出現在一道安全檢查上。
+    #
+    # 改成：host 後面的整段路徑都收下來，最後一段是 repo，其餘是 owner。
+    # 兩個 URL 只要指向同一個地方就會算出同一組值，指向不同地方就會被抓到。
     param([Parameter(Mandatory)][AllowEmptyString()][string]$RemoteUrl)
     if (-not $RemoteUrl) { return $null }
     $url = $RemoteUrl.Trim()
 
-    # scp-like：user@host:owner/repo(.git)
-    if ($url -match '^[^/@\s]+@(?<host>[^:/\s]+):(?<owner>[^/\s]+)/(?<repo>[^/\s]+?)(\.git)?/?$') {
-        return [pscustomobject]@{
-            Host  = $Matches['host'].ToLowerInvariant()
-            Owner = $Matches['owner']
-            Repo  = $Matches['repo']
-        }
+    # $host 是 PowerShell 的唯讀自動變數，而變數名**不分大小寫**——用 $host 會在
+    # 執行期炸「Cannot overwrite variable Host」。跟 PC2 當初找到的 $listPath 遮蔽
+    # $ListPath 同一族（docs\踩過的坑.md）。
+    $remoteHost = $null
+    $remotePath = $null
+    # scp-like：user@host:路徑
+    if ($url -match '^[^/@\s]+@(?<host>[^:/\s]+):(?<path>[^\s]+)$') {
+        $remoteHost = $Matches['host']; $remotePath = $Matches['path']
     }
     # ssh:// 或 https://
-    if ($url -match '^(?:https?|ssh)://(?:[^@/\s]+@)?(?<host>[^:/\s]+)(?::\d+)?/(?<owner>[^/\s]+)/(?<repo>[^/\s]+?)(\.git)?/?$') {
-        return [pscustomobject]@{
-            Host  = $Matches['host'].ToLowerInvariant()
-            Owner = $Matches['owner']
-            Repo  = $Matches['repo']
-        }
+    elseif ($url -match '^(?:https?|ssh)://(?:[^@/\s]+@)?(?<host>[^:/\s]+)(?::\d+)?/(?<path>[^\s]+)$') {
+        $remoteHost = $Matches['host']; $remotePath = $Matches['path']
     }
-    return $null
+    else {
+        # 本機路徑、bare repo 的檔案系統路徑（這個 repo 的測試套件大量使用這種
+        # origin）——沒有 host/路徑 這個概念可以比對，回 $null。呼叫端會把它當成
+        # 「無法比對」，不是「不符」。這一條沒有改。
+        return $null
+    }
+
+    $remotePath = $remotePath.TrimEnd('/')
+    if ($remotePath -match '(?i)\.git$') { $remotePath = $remotePath.Substring(0, $remotePath.Length - 4) }
+    $segments = @($remotePath -split '/' | Where-Object { $_ })
+    # 至少要 owner + repo 兩段。只有一段（`https://host/repo`）不是這個檢查認得的
+    # 形狀，寧可回「無法比對」也不要猜一個空的 owner 出來。
+    if ($segments.Count -lt 2) { return $null }
+
+    return [pscustomobject]@{
+        Host  = $remoteHost.ToLowerInvariant()
+        # 中間所有層級都算進 owner。GitLab 的 group/subgroup、Azure 的
+        # org/project/_git 都落在這裡，於是它們之間的差異抓得到了。
+        Owner = ($segments[0..($segments.Count - 2)] -join '/')
+        Repo  = $segments[-1]
+    }
 }
 
 function Test-RemoteIdentityMismatch {
@@ -203,6 +234,77 @@ function Assert-DriveLinkIgnored {
     }
 }
 
+function Assert-NoContentThroughJunction {
+    # 【票 30 對抗審查 F5】上面那條守的是 `_drive/` 這一個 junction。但
+    # **git 穿透 junction 這件事對每一個 junction 都成立**，而排除清單只寫死了那一個。
+    #
+    # 實測：在專案裡建一個指向外部資料夾的 junction（`mklink /J`，不需要提權），
+    # 心跳照樣把那個資料夾底下的檔案收進 commit。心跳每 15 分鐘自動跑、自動推——
+    # 使用者在專案裡建一個指向「圖片」的捷徑，就會靜靜地把它發佈到遠端。
+    #
+    # ADR-0001 那句「git 會直接穿透 junction、把雲端內容當成一般檔案收錄，所以排除它
+    # 是正確性要求而不是慣例」本來就是通則，只是實作時只套用在自己建的那一個上。
+    #
+    # 這裡跟 Assert-DriveLinkIgnored 同一類：**正確性要求，不是政策**，所以不走
+    # preflight（那條路可以 override），而是硬性中止。
+    #
+    # 成本：只看 git 認為「即將被收進來」的路徑，再往上檢查它們的祖先目錄是不是
+    # reparse point。成本跟這一次的變更量成正比，不是跟整個 repo 的大小成正比——
+    # 直接走檔案系統列舉會在大專案上每 15 分鐘掃一次整棵樹。
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+
+    $status = Invoke-Git -ProjectRoot $ProjectRoot -Arguments @('status', '--porcelain', '-z', '--untracked-files=all')
+    if (-not $status.Output) { return }
+
+    $checked = @{}
+    $offenders = New-Object System.Collections.ArrayList
+
+    foreach ($entry in ($status.Output -split "`0")) {
+        if ([string]::IsNullOrEmpty($entry) -or $entry.Length -lt 4) { continue }
+        $relative = $entry.Substring(3)
+        $segments = @(($relative -replace '\\', '/') -split '/')
+        if ($segments.Count -lt 2) { continue }   # 頂層檔案沒有祖先目錄可查
+
+        # 只查目錄那幾段，最後一段是檔名。
+        for ($i = 0; $i -lt $segments.Count - 1; $i++) {
+            $dirRelative = ($segments[0..$i] -join '/')
+            if ($checked.ContainsKey($dirRelative)) {
+                if ($checked[$dirRelative]) { break }
+                continue
+            }
+            $isJunction = $false
+            if ($dirRelative -ne $script:DriveLinkName) {
+                $full = Join-Path $ProjectRoot ($dirRelative -replace '/', '\')
+                $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+                if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    $isJunction = $true
+                }
+            }
+            $checked[$dirRelative] = $isJunction
+            if ($isJunction) {
+                if (-not ($offenders -contains $dirRelative)) { [void]$offenders.Add($dirRelative) }
+                break
+            }
+        }
+    }
+
+    if ($offenders.Count -eq 0) { return }
+
+    $list = ($offenders | ForEach-Object { "  $_/" }) -join "`n"
+    throw @"
+拒絕繼續：專案裡有 $($script:DriveLinkName)/ 以外的 junction（或符號連結），而且沒有被 .gitignore 排除。
+$list
+
+git 會直接穿透它們，把連結指向的內容當成這個專案的檔案收進歷史並推上遠端——
+那些內容可能根本不屬於這個專案（ADR-0001 對 $($script:DriveLinkName)/ 講的是同一件事）。
+
+三條路，選一條：
+  * 那個位置本來就該同步 → 把內容真的放進專案，不要用連結
+  * 只是自己用的捷徑 → 加進 .gitignore
+  * 那是另一個 Drive 掛載點 → 加進 .gitignore，並確認它不該被這個專案追蹤
+"@
+}
+
 function Test-TreeContainsDriveLink {
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
@@ -237,6 +339,7 @@ function New-WorkTreeSnapshot {
         }
 
         Assert-DriveLinkIgnored -ProjectRoot $ProjectRoot
+        Assert-NoContentThroughJunction -ProjectRoot $ProjectRoot
 
         $add = Invoke-Git -ProjectRoot $ProjectRoot -Arguments @('add', '-A')
         if ($add.ExitCode -ne 0) { throw "add 失敗" }

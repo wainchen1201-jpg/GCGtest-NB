@@ -98,6 +98,58 @@ function Get-ProjectSchemaVersion {
     return 1
 }
 
+function Get-SourceSchemaRange {
+    # 從**來源那一份**的 lib\version.ps1 解析出它宣告的 schema 區間（票 42）。
+    #
+    # 為什麼不直接用 $script:RuntimeSchemaMin / Max：那兩個是**執行中這個行程**載入的
+    # 值，也就是安裝者的。安裝者與來源是同一份時兩者相等，但
+    # `upgrade-runtime.ps1 -SourceRoot <某個舊開工包>\_bootstrap` 打破了那個前提——
+    # 於是 VERSION.json 會變成一半描述來源（toolVersion）、一半描述安裝者（schema）。
+    #
+    # 後果不只是「宣告錯了」。如果新版只把 schemaMax 調高、而區間與舊版重疊，
+    # 那份舊 heartbeat 會**通過**相容檢查然後放行，接著碰到它沒有對應邏輯的資料。
+    # 相容閘門存在的唯一理由就是擋這件事，而那個錯法剛好在最要緊的方向把它關掉。
+    #
+    # 用解析不用執行：不該為了讀兩個整數就去跑來源的程式碼，而且解析失敗是看得出來的。
+    param([Parameter(Mandatory)][string]$SourceDir)
+
+    $versionLib = Join-Path $SourceDir 'lib\version.ps1'
+    if (-not (Test-Path -LiteralPath $versionLib)) {
+        throw "來源沒有 lib\version.ps1，讀不到它宣告的 schema 區間：$versionLib"
+    }
+    $text = Get-Content -LiteralPath $versionLib -Raw -Encoding UTF8
+
+    # 要求**恰好一個**賦值。多於一個時正則與 PowerShell 的語意會分岔——正則取第一個，
+    # PowerShell 取最後執行到的那一個——而分岔的結果是一個看起來合理的錯值。
+    # 不猜哪一個算數，直接拒絕（外部審查指出的）。
+    $minMatches = [regex]::Matches($text, '\$script:RuntimeSchemaMin\s*=\s*(\d+)')
+    $maxMatches = [regex]::Matches($text, '\$script:RuntimeSchemaMax\s*=\s*(\d+)')
+
+    foreach ($pair in @(
+        @{ Name = 'RuntimeSchemaMin'; Matches = $minMatches },
+        @{ Name = 'RuntimeSchemaMax'; Matches = $maxMatches }
+    )) {
+        if ($pair.Matches.Count -eq 0) {
+            # 不退回安裝者的值。退回去就等於把這件事要修的東西原封不動放回來，
+            # 而且從此再也看不見——安靜的退回比大聲的失敗難查得多。
+            #
+            # 這裡只認「等號右邊是字面整數」。改成運算式或常數就會走到這一條——
+            # 那是刻意的：讀不懂就說讀不懂。而為了讓這種改動在**改的當下**就被發現、
+            # 不是在使用者安裝時才炸，test\schema-range-from-source.test.mjs 有一條
+            # 守衛盯著這個 repo 自己的 version.ps1 解析得出來。
+            throw "來源的 lib\version.ps1 裡找不到 `$script:$($pair.Name) 的字面整數宣告：$versionLib"
+        }
+        if ($pair.Matches.Count -gt 1) {
+            throw "來源的 lib\version.ps1 裡有 $($pair.Matches.Count) 處 `$script:$($pair.Name) 宣告，無法判斷哪一個算數：$versionLib"
+        }
+    }
+
+    return [pscustomobject]@{
+        Min = [int]$minMatches[0].Groups[1].Value
+        Max = [int]$maxMatches[0].Groups[1].Value
+    }
+}
+
 function Get-InstalledSchemaRange {
     # heartbeat.ps1 用這個決定「這個 runtime 認得哪個 schema 區間」（ADR-0008 相容矩陣）。
     #

@@ -191,10 +191,15 @@ function Install-RuntimeFiles {
     }
     Copy-Item -LiteralPath $policySrc -Destination $DestinationDir -Force
 
+    # schema 區間取自**來源**，跟 toolVersion 同一個出處（票 42）。原本這裡取的是
+    # $script:RuntimeSchemaMin / Max——執行中這個行程的值，也就是安裝者的。
+    # 同一份 VERSION.json 一半描述來源、一半描述安裝者，而讀它的人不知道這件事。
+    $sourceSchema = Get-SourceSchemaRange -SourceDir $sourceDir
+
     $versionInfo = [ordered]@{
         toolVersion   = $ToolVersion
-        schemaMin     = $script:RuntimeSchemaMin
-        schemaMax     = $script:RuntimeSchemaMax
+        schemaMin     = $sourceSchema.Min
+        schemaMax     = $sourceSchema.Max
         installedAt   = (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz')
         installedFrom = $sourceDir
     }

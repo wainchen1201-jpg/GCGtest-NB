@@ -11,6 +11,9 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'paths.ps1')
 . (Join-Path $PSScriptRoot 'registry.ps1')
 . (Join-Path $PSScriptRoot 'preflight.ps1')
+# 票 43：告警要分辨「找不到身分檔」與「身分檔讀不動」，判準跟 runtime-status 的
+# 「相容判定」共用同一個函式。version.ps1 只相依 paths.ps1，沒有循環。
+. (Join-Path $PSScriptRoot 'version.ps1')
 
 # 三個告警門檻（票 28 票面明列的是第一個，後兩個由這一票決定並說明理由）。
 
@@ -269,7 +272,39 @@ function Get-ProjectHealth {
                     $schemaSeen = [int]$State.skippedByVersionSchema
                 }
                 if ($schemaSeen -eq 0) {
-                    '這個路徑不是 hybrid workspace 專案（讀不到 .hybrid\project.json），持續被跳過——通常是清單裡的殘留條目，用 leave-device.ps1 把它移除'
+                    # 【票 43】schema 0 是「無法判定」的哨兵值，而它涵蓋**兩種**狀態：
+                    #   找不到 .hybrid\project.json → 清單裡的殘留條目，移除是對的
+                    #   檔案在、但讀不動             → 一個正常的專案，身分檔壞了，
+                    #                                  要修不是要移除
+                    #
+                    # heartbeat.ps1 在印標記行之前就分辨過了（它算出 $reason 印給人看），
+                    # 但標記行只帶得出 schema=0，於是 state.json 沒有這個區分。
+                    # 真機上的後果：一個身分檔被編輯壞掉的專案，告警叫人跑
+                    # leave-device.ps1——那會拆掉 junction、把一個正常的專案移出保護，
+                    # 而真正的問題（一行 JSON）原封不動。
+                    #
+                    # 不改標記行的協定（票 43 方案 A 的風險）：run-heartbeats.ps1 住在
+                    # 機器層級、由 install-heartbeat 更新，heartbeat.ps1 住在 runtime\ 、
+                    # 由 upgrade-runtime 更新——兩者版本可以不一致（票 37 的形狀）。
+                    # 新 heartbeat 在標記行後面加東西，舊 run-heartbeats 的正則（有 $ 錨點）
+                    # 就比對不到，那一輪會不再被算成「沒有拿到保護」——悄悄回到票 35 之前。
+                    #
+                    # 改成在**給建議的當下自己讀**，判準跟 runtime-status 的「相容判定」
+                    # 完全相同。沒有跨行程協定，就沒有版本相容問題；而且兩者從此讀同一個
+                    # 來源、在同一個時刻，不可能再各說各話（真機上就是它們互相矛盾）。
+                    #
+                    # 依據「現在」而不是「當時」是刻意的：使用者要的是「我現在該做什麼」。
+                    # 「資料夾整個不在」不必在這裡處理——上面第 235 行就提早回報了
+                    # （而且說得更好）。第一版我在這裡也加了一支，寫完才發現它到不了：
+                    # **死程式碼比沒有更糟，它會讓下一個人以為這裡處理過那個情況。**
+                    $schemaNow = Get-ProjectSchemaVersion -ProjectRoot $Path
+                    if (Test-Unreadable $schemaNow) {
+                        '這個專案的 .hybrid\project.json 讀不動（內容壞了，或同步到一半），持續被跳過——它是一個正常的專案，把那個檔案修好就會恢復。**不要**用 leave-device.ps1，那會把它移出保護，而檔案還是壞的'
+                    } elseif ($null -eq $schemaNow) {
+                        '這個路徑不是 hybrid workspace 專案（讀不到 .hybrid\project.json），持續被跳過——通常是清單裡的殘留條目，用 leave-device.ps1 把它移除'
+                    } else {
+                        "現在已經讀得到 .hybrid\project.json（schema $schemaNow）——問題看起來已經處理掉了，下一輪心跳應該就會恢復；如果沒有恢復再回來看這裡"
+                    }
                 } else {
                     '專案與這台機器的 runtime schema 不相容，持續被跳過——需要升級專案或這台的 runtime（upgrade-runtime.ps1）'
                 }

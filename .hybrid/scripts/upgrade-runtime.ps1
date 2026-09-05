@@ -143,6 +143,34 @@ try {
             exit $script:ExitFailed
         }
 
+        # 【票 30 F8】上面只確認了「`heartbeat.ps1` 這個檔案還在」。**檔案在不等於它能跑。**
+        #
+        # 實測：把 previous 的一個 lib 刪掉（防毒隔離的典型形狀，而這個專案史上撞過的
+        # 0x80070002 就是這樣來的），heartbeat.ps1 仍然在，於是回滾成功、exit 0，
+        # 訊息還說「兩個版本目錄都還在」——那句話字面為真，而**目錄在正是它唯一
+        # 檢查過的事**，不是使用者想知道的那件事。
+        #
+        # 回滾發生的時機，本來就是「現在這一版出問題了」。在那個時刻靜靜切到
+        # 另一份壞掉的 runtime，是這條線上最不該出現的無聲失敗。
+        #
+        # 升級早就有自我驗證了（Install-RuntimeFiles 之後跑 Test-SelfVerifyRuntime），
+        # 回滾沒有。同一個函式，這裡直接用。
+        Write-Host "自我驗證 $previousVersion……"
+        $rollbackVerify = Test-SelfVerifyRuntime -RuntimeVersionDir $previousDir
+        if (-not $rollbackVerify.Ok) {
+            Write-Host "停下來了：$previousVersion 的自我驗證沒過，指標**沒有**被改動（仍然是 $currentVersion）。"
+            Write-Host "  exit code：$($rollbackVerify.ExitCode)"
+            Write-Host "  輸出     ：$($rollbackVerify.Output)"
+            Write-Host "  位置     ：$previousDir"
+            Write-Host ""
+            Write-Host "檔案還在，但它跑不起來（少了 lib、被防毒隔離、或複製到一半）。"
+            Write-Host "回滾到一份壞掉的 runtime 不會讓事情變好——這台機器目前兩版都不可信。"
+            Write-Host "往前走比往回走可靠：用 -SourceRoot 指向一份完整的來源重裝一次"
+            Write-Host "（開工包的 _bootstrap\，或模板 repo 的 scripts\）。"
+            exit $script:ExitFailed
+        }
+        Write-Host "自我驗證通過。"
+
         if ($DryRun) {
             Write-Host "會把 current.json 從 $currentVersion 指回 $previousVersion（$previousDir）。"
             Write-Host "dry run，沒有寫入任何東西。"
@@ -150,7 +178,7 @@ try {
         }
 
         Write-RuntimeCurrent -ListPath $ListPath -Version $previousVersion -Previous $currentVersion
-        Write-Host "已回滾：current.json 現在指向 $previousVersion（原本是 $currentVersion，兩個版本目錄都還在）。"
+        Write-Host "已回滾：current.json 現在指向 $previousVersion（原本是 $currentVersion，而且它通過了自我驗證）。"
         exit $script:ExitOk
     }
 

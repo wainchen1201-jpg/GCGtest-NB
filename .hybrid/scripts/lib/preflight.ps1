@@ -105,6 +105,44 @@ function Merge-PreflightPolicyWithBaseline {
 
     $Policy.sensitiveFilePatterns = $patterns.ToArray()
     $Policy.contentSignatures = $signatures.ToArray()
+
+    # 【票 30 對抗審查】原本這裡只收緊樣式與簽章兩種，其餘欄位「原樣沿用專案的內容」。
+    # 但 sizeThresholds.hardLimitBytes 是一條**阻擋**規則的門檻——專案把它設成
+    # 999999999999 就等於自行解除單檔大小上限，而那正是整個架構存在的理由
+    # （大檔進 Drive，不進 git）。實測確認繞得過去。
+    #
+    # 諷刺的是 schema 文件明寫「單檔硬門檻規則刻意不開放進 allowlist」。
+    # **門鎖了，旁邊的牆是空的。**
+    #
+    # 數值一律取 min（只能更嚴），entropyCheck 一旦下限開啟就不能關。
+    # 專案要放寬只有一條路：改下限規則本身，而那份檔案跟著 runtime 走，專案碰不到。
+    foreach ($field in @('sizeThresholds', 'aggregateThresholds')) {
+        if (-not $baseline.PSObject.Properties[$field]) { continue }
+        if (-not $Policy.PSObject.Properties[$field] -or -not $Policy.$field) {
+            $Policy | Add-Member -NotePropertyName $field -NotePropertyValue $baseline.$field -Force
+            continue
+        }
+        foreach ($prop in $baseline.$field.PSObject.Properties) {
+            if (-not $Policy.$field.PSObject.Properties[$prop.Name]) {
+                $Policy.$field | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
+                continue
+            }
+            $projectValue = [double]$Policy.$field.($prop.Name)
+            $baselineValue = [double]$prop.Value
+            if ($projectValue -gt $baselineValue) {
+                $Policy.$field.($prop.Name) = $prop.Value
+            }
+        }
+    }
+
+    if ($baseline.PSObject.Properties['entropyCheck'] -and $baseline.entropyCheck.enabled) {
+        if (-not $Policy.PSObject.Properties['entropyCheck'] -or -not $Policy.entropyCheck) {
+            $Policy | Add-Member -NotePropertyName 'entropyCheck' -NotePropertyValue $baseline.entropyCheck -Force
+        } elseif (-not $Policy.entropyCheck.enabled) {
+            $Policy.entropyCheck.enabled = $true
+        }
+    }
+
     return $Policy
 }
 
@@ -134,9 +172,26 @@ function Test-PreflightAllowlistPathGlobValid {
     # 檢查它——一筆 `pathGlob: "*"` 的 allowlist 項目今天就能讓整條 sensitiveFilePattern
     # 或 contentSignature 規則形同虛設，這正是「政策放寬掉下限」的洞。跟 schema 用
     # 同一個判準：字串裡至少要有一個不是 `*` 也不是 `/` 的字元。
+    #
+    # 【票 30 對抗審查】原本的判準（長度 >= 3 且至少一個非 `*` 非 `/` 的字元）擋得住
+    # `*`、`**`、`**/*`，但 **擋不住 `*.*` 或 `*en*`**——兩者都滿足那兩個條件，
+    # 而 Test-PreflightGlobMatch 把 `*` 展成 `.*`，於是它們幾乎匹配每一個路徑。
+    # 實測：一筆 `pathGlob: "*.*"` 就讓 `.env` 通過，內容 SECRET=abc 被提交進 git。
+    #
+    # 判準改成跟這條規則的**用途**對齊：allowlist 是「逐檔」的例外（阻擋訊息自己就是
+    # 這樣寫的），所以**最後一段必須是具體檔名，不能含萬用字元**。
+    #   放行：`.env.example`、`docs/samples/example.pem`、`**/example.pem`
+    #   擋掉：`*`、`**/*`、`*.*`、`*en*`
+    # 目錄那幾段仍然可以用萬用字元——那不會讓例外擴散到「任意檔案」，只是讓同一個
+    # 檔名在不同位置都適用。
     param([Parameter(Mandatory)][AllowEmptyString()][string]$PathGlob)
     if ($PathGlob.Length -lt 3) { return $false }
-    return [regex]::IsMatch($PathGlob, '[^*/]')
+    if (-not [regex]::IsMatch($PathGlob, '[^*/]')) { return $false }
+
+    $segments = $PathGlob -split '/'
+    $leaf = $segments[$segments.Count - 1]
+    if ([string]::IsNullOrEmpty($leaf)) { return $false }
+    return (-not $leaf.Contains('*'))
 }
 
 function Get-PreflightCandidateFiles {

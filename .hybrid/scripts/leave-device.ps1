@@ -161,6 +161,39 @@ try {
         Write-Host "本來就不在心跳清單裡"
     }
 
+    # 【票 30 對抗審查 F6】那句「現在刪除是安全的」只有在 _drive/ 是**唯一**一個連結時
+    # 才成立。移到資源回收筒是跨磁碟區的複製再刪除，會沿著任何一個連結走進去——
+    # 那正是這支腳本存在的理由，只是原本只想到工具自己建的那一個。
+    #
+    # 這裡不自作主張拆掉使用者自己建的連結（那是他的東西，而且我們不知道他還要不要），
+    # 但**絕對不能說安全**。工具主動叫人去做一件會刪掉別處資料的事，比什麼都不說更糟。
+    $extraLinks = @(Get-ExtraReparsePoints -ProjectRoot $ProjectRoot)
+    if ($extraLinks.Count -gt 0) {
+        Write-Host ""
+        Write-Host "撤離做完了，但**現在還不能直接刪除這個資料夾**。"
+        Write-Host ""
+        Write-Host "專案裡還有 $($extraLinks.Count) 個 $($script:DriveLinkName)/ 以外的連結："
+        foreach ($link in $extraLinks) {
+            $target = Get-JunctionTarget -Path (Join-Path $ProjectRoot ($link -replace '/', '\'))
+            if ($target) {
+                Write-Host "  $link/  →  $target"
+            } else {
+                Write-Host "  $link/"
+            }
+        }
+        Write-Host ""
+        Write-Host "刪除資料夾（尤其是移到資源回收筒，那是跨磁碟區的複製再刪除）會沿著這些連結"
+        Write-Host "走進去，動到上面那些位置的資料——那些不屬於這個專案。"
+        Write-Host ""
+        Write-Host "先把它們拆掉，再刪資料夾："
+        foreach ($link in $extraLinks) {
+            Write-Host "  cmd /c rmdir `"$(Join-Path $ProjectRoot ($link -replace '/', '\'))`""
+        }
+        Write-Host ""
+        Write-Host "（rmdir 對 junction 只拆連結，不會動到目標。）"
+        exit $script:ExitNeedsYou
+    }
+
     Write-Host ""
     Write-Host "撤離完成。現在刪除 $ProjectRoot 是安全的——不會穿透到 Drive。"
     exit $script:ExitOk

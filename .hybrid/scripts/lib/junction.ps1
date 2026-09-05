@@ -34,6 +34,42 @@ function Test-IsJunction {
     return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint)
 }
 
+function Get-ExtraReparsePoints {
+    # 【票 30 對抗審查 F6】專案底下、`_drive/` 以外的所有連結（junction 或符號連結）。
+    #
+    # 為什麼撤離需要知道這件事：`leave-device` 最後那句「現在刪除專案資料夾是安全的
+    # ——不會穿透到 Drive」只有在 `_drive/` 是唯一一個連結時才成立。移到資源回收筒
+    # 是跨磁碟區的「複製再刪除」，**它會沿著任何一個連結走進去**——那正是這支腳本
+    # 存在的理由，只是原本只想到工具自己建的那一個。
+    #
+    # 走訪時**不進入**連結本身（進去就等於在走使用者的整個圖片資料夾），
+    # 也跳過 `.git`。回傳相對路徑（正斜線），排序後回傳。
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [string]$ExcludeName = $script:DriveLinkName
+    )
+
+    $found = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($ProjectRoot)
+
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($child in @(Get-ChildItem -LiteralPath $dir -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($child.Name -eq '.git') { continue }
+            $relative = ($child.FullName.Substring($ProjectRoot.Length).TrimStart('\')) -replace '\\', '/'
+            if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) {
+                # 不往裡面走：那是連結的目標，不屬於這個專案。
+                if ($relative -ne $ExcludeName) { [void]$found.Add($relative) }
+                continue
+            }
+            $stack.Push($child.FullName)
+        }
+    }
+
+    return @($found | Sort-Object)
+}
+
 function New-Junction {
     # 不需要系統管理員權限（不像 symlink）。
     param(
